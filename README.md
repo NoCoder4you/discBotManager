@@ -91,3 +91,48 @@ Working now: OAuth login/profile persistence, owner bootstrap, opaque server-sid
 Intentionally deferred: user/bot/assignment administration UI, process execution, Discord bot control channel, console streaming, files/config/database editors, backups, schedulers, notifications, role mapping, and real adapter implementations.
 
 **Recommended Stage 2:** build owner-only user/bot/role administration workflows (including CSRF-protected mutations, validation, audit emission, seed catalog, and integration tests), then implement one authenticated bot-agent/process adapter behind the existing service boundary. Do not add operational modules before assignments can be safely managed.
+
+## Stage 2 administration
+
+### Permission model and standard roles
+
+Bot authorization is resolved in this exact order: **Platform Owner bypass → explicit denial → explicit grant → assigned bot role → default deny**. Disabled users and disabled assignments are denied before role access is considered. Bot Administrator is a bot-scoped role and never grants platform ownership, user administration, OAuth configuration, other bots, or global audit access.
+
+The canonical catalog lives in `app/services/catalog.py`. **Viewer** is read-only (`bot.view`, console/command/cog/error/server/activity views). **Operator** adds routine start/restart, command sync, cog reload, backup creation, and scheduler execution. **Administrator** receives the full canonical per-bot catalog. Permissions for later-stage modules are seeded for stability but do not make those modules available.
+
+Seed or safely reconcile the catalog at any time (the command is idempotent):
+
+```bash
+python -m app.seed
+```
+
+### User provisioning
+
+1. A user authenticates with Discord and becomes a known user.
+2. With no assignment they see only the safe “No bots assigned” state.
+3. The owner opens **Users**, selects the user, assigns one enabled bot and chooses Viewer, Operator, or Administrator.
+4. The owner may add an explicit Allow or Deny per permission. Removing it returns to inherited role behavior.
+5. Disabling either the account or assignment revokes access immediately while preserving history.
+
+All owner mutations require the server-side owner dependency, a session CSRF token, typed Pydantic validation, a transaction-scoped operation, append-only audit record, and structured activity event. New bots have no assignments and therefore remain owner-only.
+
+### Registering and controlling a bot
+
+Set `BOT_ROOT` to the directory under which managed bot folders reside. Registration requires a safe lowercase ID, display metadata, an existing folder under `BOT_ROOT`, an entry file that resolves inside that folder, an existing Python executable path, colour, enabled state, owner, and adapter name. Absolute/traversal/symlink escapes are rejected. Registration never executes a bot and assignments never change ownership.
+
+The first integration is the generic Python Discord-bot adapter: it is the safest initial choice because it executes a registered entry file without requiring changes to heterogeneous bot source. `BotProcessManager` exclusively owns subprocess calls and per-bot async locks. It supports start, stop, restart, PID/uptime detail, exit status, duplicate/conflicting-action rejection, and honest `Discord state unknown` health. Process endpoints enforce `bot.view`, `bot.start`, `bot.stop`, or `bot.restart`, CSRF, operations, audit, and events. Automated tests use harmless local Python processes and never connect to Discord.
+
+> Current process registry limitation: it is memory-local. Run a single application worker for Stage 2; restarts lose process tracking, and production-grade adoption/supervision belongs in Stage 3. CPU/memory sampling and Discord-ready telemetry are also deferred.
+
+### Administration routes
+
+- `/admin/users` and `/admin/users/{id}` — paginated/searchable known-user provisioning.
+- `/admin/bots` — paginated/searchable bot registration.
+- `/admin/audit` — paginated audit viewer with validated user/operation, action, result, bot, and date filters.
+- `/api/bots/{bot_id}/status` and `/api/bots/{bot_id}/process/{start|stop|restart}` — non-enumerating, permission-scoped process API.
+
+### Security notes and Stage 3 boundary
+
+Visibility always comes from enabled database assignments; every action is checked on the backend and browser mutations require CSRF. Hidden and unknown bot detail/action requests share the same not-found behavior. A newly registered bot is visible only to the owner. Assignment administrators are not owners.
+
+Stage 2 deliberately does not implement file/database editors, backups/restore, scheduler editing, full console streaming, metrics, maintenance, deployment history, custom modules, or Discord server tooling. Stage 3 should first add a durable external process supervisor/control channel and Discord-ready heartbeat, then console streaming and resource telemetry—without weakening the Stage 2 authorization boundary.
