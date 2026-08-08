@@ -1,0 +1,6 @@
+"use strict";
+window.DBMTelemetry={
+  bytes(value){if(value==null)return "—";let amount=value;for(const unit of ["B","KB","MB","GB"]){if(amount<1024||unit==="GB")return `${unit==="B"?Math.round(amount):amount.toFixed(1)} ${unit}`;amount/=1024}return "—"},
+  uptime(value){if(value==null)return "—";let total=Math.max(0,Math.floor(value)),days=Math.floor(total/86400);total%=86400;const hours=Math.floor(total/3600);total%=3600;const minutes=Math.floor(total/60),seconds=total%60;if(days)return `${days}d ${hours}h`;if(hours)return `${hours}h ${minutes}m`;if(minutes)return `${minutes}m ${seconds}s`;return `${seconds}s`},
+  chart(canvas,samples,key,scale=1){const context=canvas.getContext("2d"),width=canvas.clientWidth,height=canvas.clientHeight,ratio=devicePixelRatio||1;canvas.width=width*ratio;canvas.height=height*ratio;context.scale(ratio,ratio);context.clearRect(0,0,width,height);if(samples.length<2)return;const values=samples.map(sample=>sample[key]/scale),maximum=Math.max(1,...values);context.strokeStyle="#7c8cff";context.lineWidth=2;context.beginPath();values.forEach((value,index)=>{const x=index/(values.length-1)*width,y=height-(value/maximum*(height-8)+4);index?context.lineTo(x,y):context.moveTo(x,y)});context.stroke()}
+};

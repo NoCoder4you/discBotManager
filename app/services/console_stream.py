@@ -1,0 +1,5 @@
+from app.core.config import get_settings
+from app.services.console import ConsoleSubscriptionManager
+
+settings=get_settings()
+console_subscriptions=ConsoleSubscriptionManager(settings.console_ws_queue_size,settings.console_ws_max_per_user,settings.console_ws_max_per_bot)
