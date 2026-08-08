@@ -15,10 +15,10 @@ class PermissionService:
         if any(x.effect is Effect.GRANT for x in overrides): return True
         if bot_id is None: return False
         assignment=self.db.scalar(select(BotAssignment).where(BotAssignment.user_id==user.id,BotAssignment.bot_id==bot_id))
-        return bool(assignment and self.db.scalar(select(RolePermission).where(RolePermission.role_id==assignment.role_id,RolePermission.permission_id==permission.id)))
+        return bool(assignment and assignment.enabled and self.db.scalar(select(RolePermission).where(RolePermission.role_id==assignment.role_id,RolePermission.permission_id==permission.id)))
     def visible_bots(self,user:User):
         if user.platform_role is PlatformRole.OWNER: return list(self.db.scalars(select(Bot).order_by(Bot.display_name)))
-        return list(self.db.scalars(select(Bot).join(BotAssignment).where(BotAssignment.user_id==user.id).order_by(Bot.display_name)))
+        return list(self.db.scalars(select(Bot).join(BotAssignment).where(BotAssignment.user_id==user.id,BotAssignment.enabled.is_(True),Bot.enabled.is_(True)).order_by(Bot.display_name)))
     def visible_bot(self,user:User,bot_id:str):
         bot=self.db.get(Bot,bot_id)
         return bot if bot and self.has(user,"bot.view",bot_id) else None

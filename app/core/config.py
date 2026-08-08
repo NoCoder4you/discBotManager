@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     environment: Literal["development", "test", "production"] = "development"
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
+    bot_root: str = "."
     @property
     def secure_cookies(self) -> bool: return self.environment == "production"
     @model_validator(mode="after")

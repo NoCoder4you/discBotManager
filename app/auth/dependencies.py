@@ -2,7 +2,7 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.core.security import session_from_request
-from app.models import User
+from app.models import PlatformRole, User
 from app.services.permissions import PermissionService
 def current_user(request:Request,db:Session=Depends(get_db))->User:
     session=session_from_request(request,db)
@@ -19,3 +19,6 @@ def requires_bot_permission(key:str):
         if not bot or not PermissionService(db).has(user,key,bot_id): raise HTTPException(404,"Resource not found")
         return bot
     return dependency
+def requires_owner(user:User=Depends(current_user))->User:
+    if user.platform_role is not PlatformRole.OWNER: raise HTTPException(403,"Forbidden")
+    return user
