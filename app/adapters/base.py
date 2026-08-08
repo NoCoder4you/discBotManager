@@ -2,9 +2,11 @@ from abc import ABC
 from dataclasses import dataclass
 from enum import Enum
 from typing import Awaitable, Callable
-class BotState(str,Enum): ONLINE="online"; STARTING="starting"; RESTARTING="restarting"; DISCONNECTED="disconnected"; CRASHED="crashed"; CRASH_LOOP="crash_loop"; MAINTENANCE="maintenance"; DISABLED="disabled"; OFFLINE="offline"; STOPPING="stopping"; UNKNOWN="unknown"
+class BotState(str,Enum): ONLINE="online"; RUNNING="running"; STARTING="starting"; RESTARTING="restarting"; DISCONNECTED="disconnected"; CRASHED="crashed"; CRASH_LOOP="crash_loop"; MAINTENANCE="maintenance"; DISABLED="disabled"; OFFLINE="offline"; STOPPING="stopping"; UNKNOWN="unknown"
 @dataclass(frozen=True)
-class BotHealth: state:BotState=BotState.UNKNOWN; process_running:bool=False; discord_connected:bool=False; discord_ready:bool=False; detail:str|None=None
+class BotHealth:
+    state:BotState=BotState.UNKNOWN; process_running:bool=False; discord_connected:bool=False; discord_ready:bool=False; detail:str|None=None
+    pid:int|None=None; instance_id:str|None=None; uptime_seconds:float|None=None; supervisor_available:bool=True
 class Danger(str,Enum): LOW="low"; MEDIUM="medium"; HIGH="high"; CRITICAL="critical"
 @dataclass(frozen=True)
 class QuickAction: key:str; name:str; description:str; required_permission:str; danger:Danger; confirmation_required:bool; handler:Callable[...,Awaitable[None]]

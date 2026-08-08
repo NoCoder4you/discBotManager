@@ -10,6 +10,17 @@ from app.services.admin import AdminError, AdminService
 from app.services.catalog import ROLE_MAPPINGS, seed_catalog
 from app.services.permissions import PermissionService
 from app.services.process_manager import BotProcessManager, ProcessConflict
+from app.supervisor.service import SupervisorConflict, SupervisorService
+from sqlalchemy.orm import sessionmaker
+
+class DirectClient:
+    def __init__(self,service): self.service=service
+    async def status(self,bot_id): return self.service.status(bot_id)
+    async def action(self,bot_id,action):
+        try: return getattr(self.service,action)(bot_id)
+        except SupervisorConflict as exc: raise ProcessConflict(str(exc)) from exc
+    async def health(self): return self.service.health()
+    async def reconcile(self): return self.service.reconcile()
 
 
 def users(db):
@@ -64,12 +75,13 @@ def test_path_escape_rejected(db,tmp_path,monkeypatch):
     get_settings.cache_clear()
 
 
-def test_process_lifecycle_and_duplicate_start(tmp_path):
+def test_process_lifecycle_and_duplicate_start(tmp_path,db):
     script=tmp_path/"bot.py"; script.write_text("import time\ntime.sleep(30)\n")
-    bot=Bot(id="real",display_name="Real",folder=str(tmp_path),entry_file="bot.py",python_executable=sys.executable,enabled=True)
+    bot=Bot(id="real",display_name="Real",folder=str(tmp_path),entry_file="bot.py",python_executable=sys.executable,enabled=True); db.add(bot); db.commit()
+    service=SupervisorService(lambda: db,1)
     async def scenario():
-        manager=BotProcessManager(); started=await manager.start_bot(bot)
-        assert started.process_running and "PID" in started.detail
+        manager=BotProcessManager(DirectClient(service)); started=await manager.start_bot(bot)
+        assert started.process_running and started.pid
         with pytest.raises(ProcessConflict): await manager.start_bot(bot)
         restarted=await manager.restart_bot(bot); assert restarted.process_running
         stopped=await manager.stop_bot(bot); assert not stopped.process_running and stopped.state.value=="offline"

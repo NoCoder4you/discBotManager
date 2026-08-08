@@ -1,60 +1,56 @@
-import asyncio
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
+from __future__ import annotations
+from typing import Protocol
+import httpx
 from app.adapters.base import BotHealth, BotState
-from app.models import Bot
+from app.core.config import get_settings
 
 class ProcessConflict(RuntimeError): pass
 class ProcessLaunchError(RuntimeError): pass
+class SupervisorUnavailable(RuntimeError): pass
 
-@dataclass
-class ManagedProcess:
-    process: asyncio.subprocess.Process
-    started_at: datetime
+class SupervisorBackend(Protocol):
+    async def status(self,bot_id:str)->dict: ...
+    async def action(self,bot_id:str,action:str)->dict: ...
+    async def health(self)->dict: ...
+    async def reconcile(self)->list[dict]: ...
+
+class SupervisorClient:
+    def __init__(self,url=None,secret=None,timeout=None):
+        settings=get_settings(); self.url=(url or settings.supervisor_url).rstrip("/"); self.secret=secret if secret is not None else settings.supervisor_secret; self.timeout=timeout or settings.supervisor_timeout
+    async def _request(self,method,path):
+        try:
+            async with httpx.AsyncClient(base_url=self.url,timeout=self.timeout) as client: response=await client.request(method,path,headers={"X-Supervisor-Secret":self.secret})
+        except httpx.RequestError as exc: raise SupervisorUnavailable("Unable to contact the process supervisor.") from exc
+        if response.status_code==409: raise ProcessConflict(response.json().get("detail","Process operation conflict"))
+        if response.status_code>=400: raise SupervisorUnavailable("The process supervisor rejected the request.")
+        return response.json()
+    async def status(self,bot_id): return await self._request("GET",f"/internal/bots/{bot_id}")
+    async def action(self,bot_id,action): return await self._request("POST",f"/internal/bots/{bot_id}/{action}")
+    async def health(self): return await self._request("GET","/internal/health")
+    async def reconcile(self): return await self._request("POST","/internal/reconcile")
 
 class BotProcessManager:
-    """In-process, lock-protected subprocess registry. Production should pair this with one app worker or an external supervisor."""
-    def __init__(self):
-        self._processes:dict[str,ManagedProcess]={}; self._states:dict[str,BotState]={}; self._locks:dict[str,asyncio.Lock]={}
-    def _lock(self,bot_id): return self._locks.setdefault(bot_id,asyncio.Lock())
-    async def get_status(self,bot_id:str,enabled:bool=True)->BotHealth:
+    """Stable application boundary for the independently running supervisor."""
+    def __init__(self,client:SupervisorBackend|None=None): self.client=client or SupervisorClient()
+    @staticmethod
+    def _health(payload):
+        return BotHealth(state=BotState(payload.get("state","unknown")),process_running=payload.get("process_running",False),detail="Process Running; Discord State Not Yet Confirmed" if payload.get("process_running") else None,pid=payload.get("pid"),instance_id=payload.get("instance_id"),uptime_seconds=payload.get("uptime_seconds"),supervisor_available=True)
+    async def get_status(self,bot_id,enabled=True):
         if not enabled: return BotHealth(BotState.DISABLED,detail="Registration disabled")
-        managed=self._processes.get(bot_id)
-        if not managed: return BotHealth(self._states.get(bot_id,BotState.OFFLINE))
-        code=managed.process.returncode
-        if code is not None:
-            self._processes.pop(bot_id,None); state=BotState.OFFLINE if code==0 else BotState.CRASHED; self._states[bot_id]=state
-            return BotHealth(state,detail=f"Process exited with code {code}")
-        uptime=(datetime.now(timezone.utc)-managed.started_at).total_seconds()
-        return BotHealth(self._states.get(bot_id,BotState.UNKNOWN),True,False,False,f"PID {managed.process.pid}; uptime {uptime:.0f}s; Discord state unknown")
-    async def start_bot(self,bot:Bot)->BotHealth:
-        async with self._lock(bot.id):
-            current=await self.get_status(bot.id,bot.enabled)
-            if not bot.enabled: raise ProcessConflict("Bot registration is disabled")
-            if current.process_running or self._states.get(bot.id) in {BotState.STARTING,BotState.RESTARTING,BotState.STOPPING}: raise ProcessConflict("Bot process is already active or changing state")
-            self._states[bot.id]=BotState.STARTING
-            try:
-                process=await asyncio.create_subprocess_exec(bot.python_executable,bot.entry_file,cwd=Path(bot.folder),stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL)
-            except (OSError,ValueError) as exc:
-                self._states[bot.id]=BotState.CRASHED; raise ProcessLaunchError("Bot process could not be launched") from exc
-            self._processes[bot.id]=ManagedProcess(process,datetime.now(timezone.utc)); self._states[bot.id]=BotState.UNKNOWN
-            return await self.get_status(bot.id)
-    async def stop_bot(self,bot:Bot)->BotHealth:
-        async with self._lock(bot.id):
-            managed=self._processes.get(bot.id)
-            if not managed or managed.process.returncode is not None: raise ProcessConflict("Bot process is not running")
-            self._states[bot.id]=BotState.STOPPING; managed.process.terminate()
-            try: await asyncio.wait_for(managed.process.wait(),10)
-            except TimeoutError: managed.process.kill(); await managed.process.wait()
-            self._processes.pop(bot.id,None); self._states[bot.id]=BotState.OFFLINE; return await self.get_status(bot.id)
-    async def restart_bot(self,bot:Bot)->BotHealth:
-        async with self._lock(bot.id):
-            managed=self._processes.get(bot.id)
-            if not managed or managed.process.returncode is not None: raise ProcessConflict("Bot process is not running")
-            self._states[bot.id]=BotState.RESTARTING; managed.process.terminate(); await managed.process.wait(); self._processes.pop(bot.id,None)
-            try: process=await asyncio.create_subprocess_exec(bot.python_executable,bot.entry_file,cwd=Path(bot.folder),stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL)
-            except OSError as exc: self._states[bot.id]=BotState.CRASHED; raise ProcessLaunchError("Bot process could not be restarted") from exc
-            self._processes[bot.id]=ManagedProcess(process,datetime.now(timezone.utc)); self._states[bot.id]=BotState.UNKNOWN; return await self.get_status(bot.id)
+        try: return self._health(await self.client.status(bot_id))
+        except SupervisorUnavailable: return BotHealth(BotState.UNKNOWN,detail="Supervisor unavailable; bot state cannot currently be confirmed",supervisor_available=False)
+    async def _action(self,bot,action):
+        if not bot.enabled: raise ProcessConflict("Bot registration is disabled")
+        try: return self._health(await self.client.action(bot.id,action))
+        except SupervisorUnavailable as exc: raise ProcessLaunchError(f"Unable to {action} bot because the supervisor is unavailable.") from exc
+    async def start_bot(self,bot): return await self._action(bot,"start")
+    async def stop_bot(self,bot): return await self._action(bot,"stop")
+    async def restart_bot(self,bot): return await self._action(bot,"restart")
+    async def supervisor_health(self):
+        try: return {**await self.client.health(),"available":True}
+        except SupervisorUnavailable: return {"status":"unavailable","available":False,"managed_processes":None}
+    async def reconcile(self):
+        try: return await self.client.reconcile()
+        except SupervisorUnavailable: return []
 
 process_manager=BotProcessManager()

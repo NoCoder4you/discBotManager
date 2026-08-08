@@ -1,0 +1,18 @@
+[Unit]
+Description=Discord Bot Manager Process Supervisor
+After=network.target
+
+[Service]
+Type=simple
+User=discbot
+Group=discbot
+WorkingDirectory=/opt/discBotManager
+EnvironmentFile=/etc/discbot-manager.env
+ExecStart=/opt/discBotManager/venv/bin/python -m app.supervisor
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

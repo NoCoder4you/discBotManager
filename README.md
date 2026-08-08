@@ -122,7 +122,47 @@ Set `BOT_ROOT` to the directory under which managed bot folders reside. Registra
 
 The first integration is the generic Python Discord-bot adapter: it is the safest initial choice because it executes a registered entry file without requiring changes to heterogeneous bot source. `BotProcessManager` exclusively owns subprocess calls and per-bot async locks. It supports start, stop, restart, PID/uptime detail, exit status, duplicate/conflicting-action rejection, and honest `Discord state unknown` health. Process endpoints enforce `bot.view`, `bot.start`, `bot.stop`, or `bot.restart`, CSRF, operations, audit, and events. Automated tests use harmless local Python processes and never connect to Discord.
 
-> Current process registry limitation: it is memory-local. Run a single application worker for Stage 2; restarts lose process tracking, and production-grade adoption/supervision belongs in Stage 3. CPU/memory sampling and Discord-ready telemetry are also deferred.
+> Stage 2 originally used a memory-local registry. Stage 3A replaces it with the durable supervisor described below. CPU/memory sampling and Discord-ready telemetry remain deferred.
+
+## Stage 3A durable process supervisor
+
+### Architecture and development startup
+
+FastAPI remains the authenticated management interface, while the independently runnable supervisor owns bot processes. `BotProcessManager` sends only a registered bot ID over a strict loopback HTTP API; the supervisor resolves the executable, entry file, and working directory from the shared trusted registry. It never accepts a command line or uses a shell. Stopping FastAPI therefore closes only the management connection and does not signal bot processes.
+
+Generate a separate credential (`python -c "import secrets; print(secrets.token_urlsafe(48))"`), set the same `SUPERVISOR_SECRET` for both services, migrate, and start the services in separate terminals:
+
+```bash
+alembic upgrade head
+python -m app.supervisor
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+| Variable | Purpose / default |
+|---|---|
+| `SUPERVISOR_SECRET` | Dedicated internal credential; 32+ characters required in production |
+| `SUPERVISOR_URL` | FastAPI client URL (`http://127.0.0.1:8765`) |
+| `SUPERVISOR_HOST`, `SUPERVISOR_PORT` | Supervisor bind address and port (`127.0.0.1`, `8765`) |
+| `SUPERVISOR_TIMEOUT` | Dashboard-to-supervisor request timeout (3 seconds) |
+| `SUPERVISOR_STOP_TIMEOUT` | Graceful termination timeout before forceful termination (10 seconds) |
+
+### Identity, generations, and reconciliation
+
+Every launch creates a UUID-backed `INST-…` generation in `bot_instances`. The durable record contains PID, OS creation time, resolved Python executable, resolved entry file, working directory, timestamps, expected-running state, last state, and exit data. Adoption requires all available identity attributes to match; **PID alone is never trusted**. An unverifiable process is reported unknown/crashed as appropriate and is never killed automatically.
+
+On supervisor startup or any status/reconcile request, persisted records are compared with OS processes. A strong match is adopted with the same PID, instance ID, start time, and uptime. A missing process expected to run becomes crashed; an intentionally stopped process remains offline. Duplicate starts are rejected under a non-blocking per-bot operation lock. Restart ends the old generation before creating a new one. Automatic crash restarting and host-boot restoration are intentionally not enabled in Stage 3A.
+
+Supervisor unavailability is reported as `unknown`, not offline. FastAPI reconnects naturally on its next timeout-bounded request; no FastAPI restart is needed. Process-running status explicitly says Discord connectivity is unconfirmed until Stage 3B.
+
+### Linux / Raspberry Pi production
+
+Install the example [`deploy/discbot-supervisor.service`](deploy/discbot-supervisor.service), adjusting its user and paths, then run `sudo systemctl daemon-reload && sudo systemctl enable --now discbot-supervisor`. Run FastAPI in a **separate** service ordered after (but not lifecycle-coupled to) the supervisor. Both services need the registry database and the same internal credential. Keep port 8765 loopback-only and protect the environment file and database with restrictive permissions.
+
+The detached child/session behavior is supported on Linux and Windows. OS permissions must allow the supervisor account to inspect and signal its children. A host reboot does not start every bot: manual, start-with-supervisor, and restore-previous-state policies are reserved for a later stage.
+
+### Security
+
+The internal API has no public frontend route and authenticates every request with a constant-time checked supervisor-only secret. Browser users can reach only assignment- and permission-scoped FastAPI endpoints, which retain CSRF protection and non-enumerating 404 behavior. Bot environments use a small host-variable allowlist plus `BOT_INSTANCE_ID`; dashboard/OAuth/supervisor secrets are not inherited. Raw command lines and host paths are not returned to users.
 
 ### Administration routes
 
