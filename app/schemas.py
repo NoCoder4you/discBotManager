@@ -1,6 +1,7 @@
 import re
 from typing import Literal
-from pydantic import BaseModel, Field, field_validator
+from datetime import datetime
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 BOT_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{1,35}$")
 
@@ -13,6 +14,21 @@ class PermissionOverrideMutation(BaseModel):
     permission_key: str = Field(min_length=3, max_length=100)
     state: Literal["inherit", "allow", "deny"]
 class ProcessAction(BaseModel): action: Literal["start", "stop", "restart"]
+class AgentHeartbeat(BaseModel):
+    bot_id: str = Field(min_length=2,max_length=36,pattern=r"^[a-z0-9][a-z0-9_-]{1,35}$")
+    instance_id: str = Field(min_length=6,max_length=41,pattern=r"^INST-[0-9a-fA-F-]{1,36}$")
+    timestamp: datetime
+    connected: bool
+    ready: bool
+    latency_ms: float|None = Field(default=None,ge=0,le=300000)
+    guild_count: int|None = Field(default=None,ge=0,le=1000000)
+    shard_count: int|None = Field(default=None,ge=1,le=10000)
+    ready_shards: int|None = Field(default=None,ge=0,le=10000)
+    @model_validator(mode="after")
+    def consistent(self):
+        if self.ready and not self.connected: raise ValueError("ready requires connected")
+        if self.ready_shards is not None and self.shard_count is not None and self.ready_shards>self.shard_count: raise ValueError("ready_shards exceeds shard_count")
+        return self
 class BotMutation(BaseModel):
     id: str = Field(min_length=2, max_length=36)
     display_name: str = Field(min_length=1, max_length=100)

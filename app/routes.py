@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+import asyncio
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
@@ -12,6 +14,11 @@ from app.core.events import AuditService, DomainEvent, EventBus, EventType
 from app.core.operations import create_operation
 from app.models import OperationStatus, utcnow
 from app.services.process_manager import ProcessConflict, ProcessLaunchError, process_manager
+from app.services.console import SlowSubscriber
+from app.services.console_stream import console_subscriptions
+from app.database import SessionLocal
+from app.models import Session as UserSession
+from app.core.config import get_settings
 router=APIRouter()
 @router.get("/",response_class=HTMLResponse)
 def home(request:Request): return request.app.state.templates.TemplateResponse(request,"login.html",{})
@@ -20,10 +27,50 @@ def dashboard(request:Request,user:User=Depends(current_user),db:Session=Depends
     bots=PermissionService(db).visible_bots(user); session=session_from_request(request,db); return request.app.state.templates.TemplateResponse(request,"dashboard.html",{"user":user,"bots":bots,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token})
 @router.get("/bots/{bot_id}",response_class=HTMLResponse)
 def bot_detail(request:Request,bot:Bot=Depends(requires_bot_permission("bot.view")),user:User=Depends(current_user),db:Session=Depends(get_db)):
-    session=session_from_request(request,db); permissions={key:PermissionService(db).has(user,key,bot.id) for key in ("bot.start","bot.stop","bot.restart")}; return request.app.state.templates.TemplateResponse(request,"bot.html",{"user":user,"bot":bot,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token,"permissions":permissions})
+    session=session_from_request(request,db); permissions={key:PermissionService(db).has(user,key,bot.id) for key in ("bot.start","bot.stop","bot.restart","console.view")}; return request.app.state.templates.TemplateResponse(request,"bot.html",{"user":user,"bot":bot,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token,"permissions":permissions})
+@router.get("/bots/{bot_id}/console",response_class=HTMLResponse)
+def console_page(request:Request,bot:Bot=Depends(requires_bot_permission("console.view")),user:User=Depends(current_user),db:Session=Depends(get_db)):
+    session=session_from_request(request,db); return request.app.state.templates.TemplateResponse(request,"console.html",{"user":user,"bot":bot,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token})
+
+def _console_access(session_id,bot_id,session_factory=SessionLocal):
+    with session_factory() as db:
+        session=db.get(UserSession,session_id) if session_id else None
+        expires=session.expires_at.replace(tzinfo=timezone.utc) if session and session.expires_at.tzinfo is None else (session.expires_at if session else None)
+        if not session or not session.user or not session.user.enabled or expires<=datetime.now(timezone.utc): return None
+        bot=PermissionService(db).visible_bot(session.user,bot_id)
+        return session.user.id if bot and PermissionService(db).has(session.user,"console.view",bot_id) else None
+
+@router.websocket("/ws/bots/{bot_id}/console")
+async def console_socket(websocket:WebSocket,bot_id:str):
+    session_id=websocket.cookies.get("dbm_session"); factory=websocket.app.state.session_factory; user_id=_console_access(session_id,bot_id,factory)
+    if user_id is None: await websocket.close(code=4404,reason="Resource unavailable"); return
+    try: token,queue=console_subscriptions.subscribe(user_id,bot_id)
+    except SlowSubscriber: await websocket.close(code=4429,reason="Connection limit reached"); return
+    await websocket.accept(); await websocket.send_json({"type":"connection","state":"connected"})
+    after=0; stream_id=None; checked=0.0; capture_state=None; settings=get_settings()
+    try:
+        while True:
+            if console_subscriptions.revoked(token): await websocket.close(code=4403,reason="Permission revoked"); return
+            now=asyncio.get_running_loop().time()
+            if now-checked>=settings.console_permission_revalidate_seconds:
+                checked=now
+                if _console_access(session_id,bot_id,factory)!=user_id: await websocket.send_json({"type":"connection","state":"permission_revoked"}); await websocket.close(code=4403,reason="Permission revoked"); return
+            try:
+                payload=await process_manager.client.console(bot_id,after); current_stream=payload.get("stream_id")
+                if stream_id is not None and current_stream!=stream_id: after=0; payload=await process_manager.client.console(bot_id,0)
+                stream_id=payload.get("stream_id"); records=payload.get("records",[]); available=payload.get("capture_available",False)
+                if available!=capture_state: capture_state=available; await websocket.send_json({"type":"connection","state":"connected" if available else "console_unavailable"})
+                if records: after=max(after,max(x["sequence"] for x in records)); console_subscriptions.publish(bot_id,records,stream_id)
+            except Exception:
+                if capture_state is not False: capture_state=False; await websocket.send_json({"type":"connection","state":"console_unavailable"})
+            try: record=await asyncio.wait_for(queue.get(),.25); await websocket.send_json(record)
+            except asyncio.TimeoutError: pass
+    except WebSocketDisconnect: pass
+    finally: console_subscriptions.unsubscribe(token)
 @router.get("/api/bots/{bot_id}/status")
 async def bot_status(bot:Bot=Depends(requires_bot_permission("bot.view"))):
-    health=await process_manager.get_status(bot.id,bot.enabled); return {"state":health.state.value,"process_running":health.process_running,"discord_connected":health.discord_connected,"discord_ready":health.discord_ready,"detail":health.detail,"pid":health.pid,"instance_id":health.instance_id,"uptime_seconds":health.uptime_seconds,"supervisor_available":health.supervisor_available}
+    health=await process_manager.get_status(bot.id,bot.enabled)
+    return {"state":health.state.value,"process":{"state":"running" if health.process_running else health.state.value,"running":health.process_running,"pid":health.pid,"uptime_seconds":health.uptime_seconds},"discord":{"connected":health.discord_connected,"ready":health.discord_ready,"latency_ms":health.latency_ms,"guild_count":health.guild_count,"last_heartbeat_at":health.last_heartbeat_at,"ready_at":health.ready_at,"last_ready_at":health.last_ready_at,"heartbeat_fresh":health.heartbeat_fresh},"detail":health.detail,"supervisor_available":health.supervisor_available,"instance_id":health.instance_id}
 @router.get("/api/supervisor/status")
 async def supervisor_status(_:User=Depends(requires_owner)): return await process_manager.supervisor_health()
 @router.post("/api/bots/{bot_id}/process/{action}")

@@ -10,6 +10,7 @@ from app.database import get_db
 from app.models import AuditLog, Bot, BotAssignment, Permission, Role, User, UserPermission
 from app.schemas import AssignmentMutation, BotMutation, PermissionOverrideMutation, UserStatusUpdate
 from app.services.admin import AdminError, AdminService
+from app.services.console_stream import console_subscriptions
 
 router=APIRouter(prefix="/admin",tags=["administration"])
 def page_context(request,db,user,**values):
@@ -45,6 +46,7 @@ def user_status(user_id:int,request:Request,enabled:bool=Form(...),csrf_token:st
     if not target: raise HTTPException(404,"Resource not found")
     try: op=AdminService(db).set_user_enabled(owner,target,data.enabled)
     except AdminError as exc: raise HTTPException(409,str(exc)) from exc
+    if not data.enabled: console_subscriptions.revoke(target.id)
     return redirect(f"/admin/users/{user_id}",op)
 @router.post("/users/{user_id}/assignments")
 def assignment(user_id:int,request:Request,bot_id:str=Form(...),role_key:str=Form(...),enabled:bool=Form(False),csrf_token:str=Form(...),owner:User=Depends(requires_owner),db:Session=Depends(get_db)):
@@ -52,6 +54,7 @@ def assignment(user_id:int,request:Request,bot_id:str=Form(...),role_key:str=For
     if not target: raise HTTPException(404,"Resource not found")
     try: _,op=AdminService(db).assign(owner,target,data)
     except AdminError as exc: raise HTTPException(409,str(exc)) from exc
+    console_subscriptions.revoke(target.id,data.bot_id)
     return redirect(f"/admin/users/{user_id}",op)
 @router.post("/users/{user_id}/assignments/{bot_id}/revoke")
 def revoke(user_id:int,bot_id:str,request:Request,csrf_token:str=Form(...),owner:User=Depends(requires_owner),db:Session=Depends(get_db)):
@@ -59,6 +62,7 @@ def revoke(user_id:int,bot_id:str,request:Request,csrf_token:str=Form(...),owner
     if not target: raise HTTPException(404,"Resource not found")
     try: op=AdminService(db).revoke(owner,target,bot_id)
     except AdminError as exc: raise HTTPException(409,str(exc)) from exc
+    console_subscriptions.revoke(target.id,bot_id)
     return redirect(f"/admin/users/{user_id}",op)
 @router.post("/users/{user_id}/assignments/{bot_id}/override")
 def override(user_id:int,bot_id:str,request:Request,permission_key:str=Form(...),state:str=Form(...),csrf_token:str=Form(...),owner:User=Depends(requires_owner),db:Session=Depends(get_db)):
@@ -66,6 +70,7 @@ def override(user_id:int,bot_id:str,request:Request,permission_key:str=Form(...)
     if not target: raise HTTPException(404,"Resource not found")
     try: op=AdminService(db).override(owner,target,bot_id,data)
     except AdminError as exc: raise HTTPException(409,str(exc)) from exc
+    console_subscriptions.revoke(target.id,bot_id)
     return redirect(f"/admin/users/{user_id}",op)
 
 @router.get("/bots",response_class=HTMLResponse)
