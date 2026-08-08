@@ -103,6 +103,14 @@ class SupervisorService:
             if row: self._reconcile_row(db,row); db.commit()
             return self._payload(row,bot.enabled)
 
+    def registered_instance(self,bot_id:str)->dict:
+        """Read durable telemetry routing identity without triggering OS sampling."""
+        with self.db_factory() as db:
+            bot=db.get(Bot,bot_id)
+            if not bot: raise BotNotRegistered("Bot is not registered")
+            row=self._current(db,bot_id)
+            return {"enabled":bot.enabled,"instance_id":row.instance_id if row else None,"process_expected":bool(row and row.state in {"running","starting"})}
+
     def start(self,bot_id: str) -> dict:
         if not self._lock(bot_id).acquire(blocking=False): raise SupervisorConflict("Another process operation is already in progress for this bot.")
         try:

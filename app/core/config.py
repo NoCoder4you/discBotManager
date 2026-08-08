@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     console_ws_max_per_user: int = Field(default=3,ge=1,le=20)
     console_ws_max_per_bot: int = Field(default=25,ge=1,le=500)
     console_permission_revalidate_seconds: float = Field(default=5,ge=1,le=60)
+    telemetry_interval_seconds: float = Field(default=5,ge=1,le=300)
+    telemetry_history_minutes: int = Field(default=60,ge=1,le=1440)
+    telemetry_stale_after_seconds: float = Field(default=15,ge=2,le=900)
     @property
     def secure_cookies(self) -> bool: return self.environment == "production"
     @model_validator(mode="after")

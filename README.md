@@ -229,3 +229,26 @@ Logs use the validated internal bot ID beneath `CONSOLE_LOG_ROOT` (default `logs
 The browser receives structured JSON and constructs DOM nodes with `textContent`, so output such as `<script>` and `<img onerror>` remains literal text. Pause, stream filters, auto-scroll, and Clear Display are browser-only controls. Disconnects retry at 1, 2, 5, 10, then 30 seconds; permission denial does not retry.
 
 FastAPI can restart without controlling the bot or the supervisor's capture threads. Its replacement WebSocket retrieves the supervisor's bounded history and resumes live updates. A supervisor restart cannot reattach to stdout/stderr pipes belonging to an already adopted Stage 3A process; the bot remains running and Discord health remains independent, but console capture is unavailable until the next managed process generation. Stage 3C deliberately provides no console input, remote shell, Python execution, telemetry, file/database tooling, or long-term console analytics.
+
+## Resource Monitoring Architecture (Stage 3D)
+
+```text
+Validated managed process → supervisor TelemetryCollector → bounded TelemetryStore
+                          → authenticated supervisor API → bot.view-scoped FastAPI API → dashboard
+```
+
+The durable supervisor owns one central sampling loop for every managed bot, independent of the number of dashboard viewers. Before every sample it reuses Stage 3A's complete process identity validation: PID, OS creation time, resolved executable, working directory, and entry-point command must still match the current durable instance. PID alone is never sufficient. FastAPI and browser requests only read already-collected samples and never call `psutil`.
+
+### CPU, memory, and uptime
+
+CPU uses `psutil.Process.cpu_percent(None)`. A new process handle is primed on its first collection pass and is not published until a later interval produces a meaningful delta. Values use psutil's process convention: **100% represents one fully utilised logical CPU core**, so a multi-threaded process can exceed 100%. CPU is not normalized across total host capacity.
+
+Memory is the main managed process's resident set size (`memory_info().rss`) stored as raw bytes. Child-process tree memory and host-wide memory are deliberately excluded. Uptime is calculated from the validated OS process creation timestamp, so refreshing or restarting FastAPI does not reset it; a new Stage 3A instance/process does.
+
+### Sampling, history, freshness, and permissions
+
+`TELEMETRY_INTERVAL_SECONDS` defaults to five seconds. `TELEMETRY_HISTORY_MINUTES` defaults to 60 minutes, giving 721 lightweight samples per bot at the default interval; bounded deques evict the oldest samples and SQLite receives no per-sample writes. Samples retain bot and instance IDs, old-instance history can remain within the short window, and only the current instance can be returned as live telemetry. `TELEMETRY_STALE_AFTER_SECONDS` defaults to 15 seconds. Missing, invalid, exited, or stale processes return unavailable metrics rather than old CPU/RSS values.
+
+Both current and history APIs require the existing per-bot `bot.view` permission. Owner access, assignments, disabled users/assignments, explicit denies, and hidden-resource 404 behavior remain unchanged. The dashboard polls cached current data every five seconds and redraws lightweight Canvas CPU/RSS history every ten seconds.
+
+Telemetry failures are isolated from process state, Discord readiness, and console capture. A supervisor restart safely adopts and primes telemetry for identity-validated processes; its in-memory short-term history resets, but process uptime remains based on the original OS creation time. This stage does not include host temperature/load, disk/network metrics, process-tree RSS, alerting, or persistent long-term analytics.

@@ -1,6 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
@@ -13,7 +13,7 @@ from app.core.security import require_csrf
 from app.core.events import AuditService, DomainEvent, EventBus, EventType
 from app.core.operations import create_operation
 from app.models import OperationStatus, utcnow
-from app.services.process_manager import ProcessConflict, ProcessLaunchError, process_manager
+from app.services.process_manager import ProcessConflict, ProcessLaunchError, SupervisorUnavailable, process_manager
 from app.services.console import SlowSubscriber
 from app.services.console_stream import console_subscriptions
 from app.database import SessionLocal
@@ -71,6 +71,15 @@ async def console_socket(websocket:WebSocket,bot_id:str):
 async def bot_status(bot:Bot=Depends(requires_bot_permission("bot.view"))):
     health=await process_manager.get_status(bot.id,bot.enabled)
     return {"state":health.state.value,"process":{"state":"running" if health.process_running else health.state.value,"running":health.process_running,"pid":health.pid,"uptime_seconds":health.uptime_seconds},"discord":{"connected":health.discord_connected,"ready":health.discord_ready,"latency_ms":health.latency_ms,"guild_count":health.guild_count,"last_heartbeat_at":health.last_heartbeat_at,"ready_at":health.ready_at,"last_ready_at":health.last_ready_at,"heartbeat_fresh":health.heartbeat_fresh},"detail":health.detail,"supervisor_available":health.supervisor_available,"instance_id":health.instance_id}
+@router.get("/api/bots/{bot_id}/telemetry")
+async def bot_telemetry(bot:Bot=Depends(requires_bot_permission("bot.view"))):
+    try: return await process_manager.client.telemetry(bot.id)
+    except SupervisorUnavailable: return {"available":False,"stale":False,"sample":None}
+@router.get("/api/bots/{bot_id}/telemetry/history")
+async def bot_telemetry_history(minutes:int=Query(60,ge=1,le=1440),bot:Bot=Depends(requires_bot_permission("bot.view"))):
+    window=min(minutes,get_settings().telemetry_history_minutes)
+    try: return await process_manager.client.telemetry_history(bot.id,window)
+    except SupervisorUnavailable: return {"minutes":window,"samples":[]}
 @router.get("/api/supervisor/status")
 async def supervisor_status(_:User=Depends(requires_owner)): return await process_manager.supervisor_health()
 @router.post("/api/bots/{bot_id}/process/{action}")

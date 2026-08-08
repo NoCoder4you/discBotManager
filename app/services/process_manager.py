@@ -14,6 +14,8 @@ class SupervisorBackend(Protocol):
     async def health(self)->dict: ...
     async def reconcile(self)->list[dict]: ...
     async def console(self,bot_id:str,after:int=0)->dict: ...
+    async def telemetry(self,bot_id:str)->dict: ...
+    async def telemetry_history(self,bot_id:str,minutes:int)->dict: ...
 
 class SupervisorClient:
     def __init__(self,url=None,secret=None,timeout=None):
@@ -30,6 +32,8 @@ class SupervisorClient:
     async def health(self): return await self._request("GET","/internal/health")
     async def reconcile(self): return await self._request("POST","/internal/reconcile")
     async def console(self,bot_id,after=0): return await self._request("GET",f"/internal/bots/{bot_id}/console?after={after}")
+    async def telemetry(self,bot_id): return await self._request("GET",f"/internal/bots/{bot_id}/telemetry")
+    async def telemetry_history(self,bot_id,minutes): return await self._request("GET",f"/internal/bots/{bot_id}/telemetry/history?minutes={minutes}")
 
 class BotProcessManager:
     """Stable application boundary for the independently running supervisor."""
