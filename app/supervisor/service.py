@@ -4,6 +4,8 @@ import os
 import subprocess
 import threading
 import uuid
+import secrets
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import ActivityEvent, Bot, BotInstance, utcnow
+from app.core.config import get_settings
+from app.services.bot_state import BotStateResolver, StateInputs
 
 
 class SupervisorConflict(RuntimeError): pass
@@ -71,9 +75,14 @@ class SupervisorService:
         if self._identity_valid(row):
             previous=row.state; row.state="running"
             if previous not in {"running","starting","restarting"}: self._event(db,"BOT_PROCESS_ADOPTED",row,pid=row.pid,previous_state=previous)
+            last=_aware(row.last_heartbeat_at)
+            if last and (datetime.now(timezone.utc)-last).total_seconds()>get_settings().bot_heartbeat_timeout_seconds and (row.discord_connected or row.discord_ready):
+                row.discord_connected=False; row.discord_ready=False; row.discord_latency_ms=None; row.guild_count=None
+                self._event(db,"BOT_HEARTBEAT_LOST",row,last_heartbeat_at=last.isoformat())
         elif row.state in {"running","starting","stopping","restarting"} or row.expected_running:
             previous=row.state; row.state="crashed" if row.expected_running else "offline"; row.ended_at=row.ended_at or utcnow()
             self._event(db,"BOT_CRASHED" if row.expected_running else "BOT_PROCESS_LOST",row,pid=row.pid,previous_state=previous,state=row.state)
+            row.discord_connected=False; row.discord_ready=False; row.discord_latency_ms=None; row.guild_count=None
         return row
 
     @staticmethod
@@ -81,7 +90,10 @@ class SupervisorService:
         if not enabled: return {"state":"disabled","process_running":False}
         if not row: return {"state":"offline","process_running":False}
         started=_aware(row.started_at); uptime=max(0,(datetime.now(timezone.utc)-started).total_seconds()) if row.state=="running" and started else None
-        return {"state":row.state,"process_running":row.state=="running","pid":row.pid,"instance_id":row.instance_id,"started_at":started.isoformat() if started else None,"uptime_seconds":uptime,"expected_running":row.expected_running,"exit_code":row.exit_code,"discord_state":"unconfirmed"}
+        settings=get_settings(); running=row.state in {"running","starting"}
+        resolved=BotStateResolver(settings.bot_heartbeat_timeout_seconds,settings.bot_ready_timeout_seconds).resolve(StateInputs(enabled,row.state,running,row.expected_running,started_at=started,connected=row.discord_connected,ready=row.discord_ready,last_heartbeat_at=row.last_heartbeat_at))
+        last=row.last_heartbeat_at; fresh=bool(last and (datetime.now(timezone.utc)-_aware(last)).total_seconds()<=settings.bot_heartbeat_timeout_seconds)
+        return {"state":resolved.value,"process_state":row.state,"process_running":running,"pid":row.pid,"instance_id":row.instance_id,"started_at":started.isoformat() if started else None,"uptime_seconds":uptime,"expected_running":row.expected_running,"exit_code":row.exit_code,"discord_connected":row.discord_connected if fresh else False,"discord_ready":row.discord_ready if fresh else False,"heartbeat_fresh":fresh,"last_heartbeat_at":_aware(last).isoformat() if last else None,"ready_at":_aware(row.ready_at).isoformat() if row.ready_at else None,"last_ready_at":_aware(row.last_ready_at).isoformat() if row.last_ready_at else None,"latency_ms":row.discord_latency_ms if fresh else None,"guild_count":row.guild_count if fresh else None}
 
     def status(self,bot_id: str) -> dict:
         with self.db_factory() as db:
@@ -104,10 +116,12 @@ class SupervisorService:
                     if current.state in {"running","starting","restarting","stopping"}: db.commit(); raise SupervisorConflict("Bot is already running.")
                     current.expected_running=False
                 executable,entry,cwd=self._configuration(bot); instance_id=f"INST-{uuid.uuid4()}"
+                management_secret=secrets.token_urlsafe(48); bot.management_secret_hash=hashlib.sha256(management_secret.encode()).hexdigest()
                 row=BotInstance(bot_id=bot.id,instance_id=instance_id,state="starting",expected_running=True,python_executable=executable,entry_file=entry,working_directory=cwd,supervisor_instance_id=self.instance_id)
                 db.add(row); db.commit()
                 environment={k:v for k,v in os.environ.items() if k in {"PATH","HOME","USER","LOGNAME","LANG","LC_ALL","TMPDIR","TEMP","TMP","SYSTEMROOT","WINDIR"}}
                 environment["BOT_INSTANCE_ID"]=instance_id
+                environment.update({"BOT_MANAGEMENT_BOT_ID":bot.id,"BOT_MANAGEMENT_SECRET":management_secret,"BOT_MANAGEMENT_HEARTBEAT_URL":f"http://{get_settings().supervisor_host}:{get_settings().supervisor_port}/internal/agent/heartbeat","BOT_HEARTBEAT_INTERVAL_SECONDS":str(get_settings().bot_heartbeat_interval_seconds)})
                 flags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name=="nt" else 0
                 try:
                     process=subprocess.Popen([executable,entry],cwd=cwd,env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=os.name!="nt",creationflags=flags)
@@ -150,8 +164,9 @@ class SupervisorService:
                 except psutil.TimeoutExpired: process.kill(); row.exit_code=process.wait(timeout=self.stop_timeout)
                 row.ended_at=utcnow(); row.state="offline"; db.commit()
                 executable,entry,cwd=self._configuration(bot); instance_id=f"INST-{uuid.uuid4()}"
+                management_secret=secrets.token_urlsafe(48); bot.management_secret_hash=hashlib.sha256(management_secret.encode()).hexdigest()
                 new=BotInstance(bot_id=bot.id,instance_id=instance_id,state="starting",expected_running=True,python_executable=executable,entry_file=entry,working_directory=cwd,supervisor_instance_id=self.instance_id); db.add(new); db.commit()
-                env={k:v for k,v in os.environ.items() if k in {"PATH","HOME","USER","LOGNAME","LANG","LC_ALL","TMPDIR","TEMP","TMP","SYSTEMROOT","WINDIR"}}; env["BOT_INSTANCE_ID"]=instance_id
+                env={k:v for k,v in os.environ.items() if k in {"PATH","HOME","USER","LOGNAME","LANG","LC_ALL","TMPDIR","TEMP","TMP","SYSTEMROOT","WINDIR"}}; env.update({"BOT_INSTANCE_ID":instance_id,"BOT_MANAGEMENT_BOT_ID":bot.id,"BOT_MANAGEMENT_SECRET":management_secret,"BOT_MANAGEMENT_HEARTBEAT_URL":f"http://{get_settings().supervisor_host}:{get_settings().supervisor_port}/internal/agent/heartbeat","BOT_HEARTBEAT_INTERVAL_SECONDS":str(get_settings().bot_heartbeat_interval_seconds)})
                 process=subprocess.Popen([executable,entry],cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=os.name!="nt",creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name=="nt" else 0)
                 created=datetime.fromtimestamp(psutil.Process(process.pid).create_time(),timezone.utc); new.pid=process.pid; new.process_created_at=created; new.started_at=created; new.state="running"; db.commit(); return self._payload(new)
         finally: self._lock(bot_id).release()

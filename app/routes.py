@@ -23,7 +23,8 @@ def bot_detail(request:Request,bot:Bot=Depends(requires_bot_permission("bot.view
     session=session_from_request(request,db); permissions={key:PermissionService(db).has(user,key,bot.id) for key in ("bot.start","bot.stop","bot.restart")}; return request.app.state.templates.TemplateResponse(request,"bot.html",{"user":user,"bot":bot,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token,"permissions":permissions})
 @router.get("/api/bots/{bot_id}/status")
 async def bot_status(bot:Bot=Depends(requires_bot_permission("bot.view"))):
-    health=await process_manager.get_status(bot.id,bot.enabled); return {"state":health.state.value,"process_running":health.process_running,"discord_connected":health.discord_connected,"discord_ready":health.discord_ready,"detail":health.detail,"pid":health.pid,"instance_id":health.instance_id,"uptime_seconds":health.uptime_seconds,"supervisor_available":health.supervisor_available}
+    health=await process_manager.get_status(bot.id,bot.enabled)
+    return {"state":health.state.value,"process":{"state":"running" if health.process_running else health.state.value,"running":health.process_running,"pid":health.pid,"uptime_seconds":health.uptime_seconds},"discord":{"connected":health.discord_connected,"ready":health.discord_ready,"latency_ms":health.latency_ms,"guild_count":health.guild_count,"last_heartbeat_at":health.last_heartbeat_at,"ready_at":health.ready_at,"last_ready_at":health.last_ready_at,"heartbeat_fresh":health.heartbeat_fresh},"detail":health.detail,"supervisor_available":health.supervisor_available,"instance_id":health.instance_id}
 @router.get("/api/supervisor/status")
 async def supervisor_status(_:User=Depends(requires_owner)): return await process_manager.supervisor_health()
 @router.post("/api/bots/{bot_id}/process/{action}")

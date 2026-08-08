@@ -1,10 +1,13 @@
 import hmac
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from app.core.config import get_settings
 from app.database import SessionLocal
 from app.supervisor.service import BotNotRegistered, IdentityMismatch, SupervisorConflict, SupervisorService
+from app.schemas import AgentHeartbeat
+from app.services.heartbeat import HeartbeatRejected, HeartbeatService
 
 settings=get_settings(); service=SupervisorService(SessionLocal,settings.supervisor_stop_timeout)
+heartbeat_service=HeartbeatService(SessionLocal,settings.bot_heartbeat_clock_skew_seconds,settings.bot_heartbeat_min_interval_seconds,settings.bot_heartbeat_timeout_seconds)
 app=FastAPI(title="Bot Process Supervisor",docs_url=None,redoc_url=None,openapi_url=None)
 
 def authenticated(x_supervisor_secret: str | None=Header(None)):
@@ -14,6 +17,12 @@ def call(method,*args):
     try: return getattr(service,method)(*args)
     except BotNotRegistered as exc: raise HTTPException(404,str(exc)) from exc
     except (SupervisorConflict,IdentityMismatch) as exc: raise HTTPException(409,str(exc)) from exc
+
+@app.post("/internal/agent/heartbeat")
+async def heartbeat(request:Request,payload:AgentHeartbeat,x_bot_management_secret:str|None=Header(None)):
+    if request.headers.get("content-length") and int(request.headers["content-length"])>4096: raise HTTPException(413,"Heartbeat payload too large")
+    try: return heartbeat_service.accept(payload,x_bot_management_secret)
+    except HeartbeatRejected as exc: raise HTTPException(exc.status_code,str(exc)) from exc
 
 @app.get("/internal/health",dependencies=[Depends(authenticated)])
 def health(): return service.health()
