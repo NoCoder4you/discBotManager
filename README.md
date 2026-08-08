@@ -205,3 +205,27 @@ The central `BotStateResolver` applies this precedence: disabled registration �
 To integrate another `discord.py` bot, construct `BotManagementAgent.from_environment()`, call `integrate_discord_client(client, agent)`, start the agent from the bot's async startup hook, and stop it during clean shutdown. `on_connect`, `on_disconnect`, and every `on_ready` update the reusable agent; reporting failures are isolated from those callbacks.
 
 If FastAPI is unavailable, heartbeats continue to the supervisor and the Discord bot continues running. If the supervisor or heartbeat path is unavailable, the agent retries with capped exponential backoff while Discord operation continues. After infrastructure returns, a fresh current-instance heartbeat restores online state without restarting the bot. Full sharding aggregation, multi-host agents, console streaming, telemetry, and long-term uptime analytics are deliberately deferred.
+
+## Live Console Architecture (Stage 3C)
+
+```text
+Bot stdout/stderr → durable supervisor → SecretRedactor → bounded ConsoleBroker
+                    ├→ rotating per-bot logs
+                    └→ authenticated supervisor API → permission-scoped FastAPI WebSocket
+```
+
+The durable supervisor opens and continuously drains both subprocess pipes as soon as it launches a bot; console viewing does not create pipe readers and is never required to prevent a child from blocking. Every structured record contains a monotonic sequence, UTC timestamp, validated bot ID, durable instance ID, `stdout`/`stderr`/`system` stream, and plain-text message. The in-memory history defaults to 5,000 records and each decoded UTF-8 line (invalid bytes use replacement characters) is limited to 16,384 characters. Instance start/end markers cannot be confused with bot output because their stream is `system`.
+
+### Redaction and log rotation
+
+`SecretRedactor` strips ANSI/control sequences and replaces known exact secrets and common token/key assignments with `[REDACTED]` before a record enters memory, disk, or fan-out. Exact values include the application secret, OAuth client secret, supervisor secret, database URL/credentials, secret-like supervisor environment values, and the generated bot-agent credential. Discord-token-shaped strings and labelled tokens, API keys, passwords, and secrets are also redacted. Operators should still register uncommon application secrets through protected supervisor environment variables whose names contain `TOKEN`, `SECRET`, `PASSWORD`, or `API_KEY`.
+
+Logs use the validated internal bot ID beneath `CONSOLE_LOG_ROOT` (default `logs/bots`) and never a display name. `console.log` rotates at 10 MiB with five retained backups by default. Persistence errors mark console persistence unavailable but never propagate into, stop, or change Discord/process health.
+
+### WebSocket permissions and safety
+
+`/ws/bots/{bot_id}/console` authenticates the existing `dbm_session`, checks session expiry, enabled-user state, bot assignment, and the existing per-bot `console.view` permission **before accepting**. Unknown and unauthorised bots share a non-enumerating denial. Explicit denies continue to override roles/grants. Active subscriptions are marked for immediate revalidation by assignment, override, account-disable, and logout mutations and are periodically checked every five seconds for missed or external changes. Each user defaults to three connections, each bot to 25, and every subscriber queue is bounded at 1,000 records; lagging clients are disconnected without affecting other viewers.
+
+The browser receives structured JSON and constructs DOM nodes with `textContent`, so output such as `<script>` and `<img onerror>` remains literal text. Pause, stream filters, auto-scroll, and Clear Display are browser-only controls. Disconnects retry at 1, 2, 5, 10, then 30 seconds; permission denial does not retry.
+
+FastAPI can restart without controlling the bot or the supervisor's capture threads. Its replacement WebSocket retrieves the supervisor's bounded history and resumes live updates. A supervisor restart cannot reattach to stdout/stderr pipes belonging to an already adopted Stage 3A process; the bot remains running and Discord health remains independent, but console capture is unavailable until the next managed process generation. Stage 3C deliberately provides no console input, remote shell, Python execution, telemetry, file/database tooling, or long-term console analytics.

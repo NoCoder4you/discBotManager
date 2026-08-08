@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     bot_ready_timeout_seconds: float = Field(default=60.0, ge=2, le=1800)
     bot_heartbeat_clock_skew_seconds: float = Field(default=60.0, ge=1, le=600)
     bot_heartbeat_min_interval_seconds: float = Field(default=0.5, ge=0.1, le=30)
+    console_buffer_lines: int = Field(default=5000,ge=100,le=100000)
+    console_max_line_length: int = Field(default=16384,ge=256,le=1048576)
+    console_log_root: str = "logs/bots"
+    console_log_max_bytes: int = Field(default=10485760,ge=1024,le=1073741824)
+    console_log_backup_count: int = Field(default=5,ge=0,le=100)
+    console_ws_queue_size: int = Field(default=1000,ge=10,le=10000)
+    console_ws_max_per_user: int = Field(default=3,ge=1,le=20)
+    console_ws_max_per_bot: int = Field(default=25,ge=1,le=500)
+    console_permission_revalidate_seconds: float = Field(default=5,ge=1,le=60)
     @property
     def secure_cookies(self) -> bool: return self.environment == "production"
     @model_validator(mode="after")

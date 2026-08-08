@@ -10,6 +10,7 @@ from app.core.config import get_settings
 from app.core.security import COOKIE, new_session, require_csrf, session_from_request
 from app.database import get_db
 from app.models import PlatformRole, User
+from app.services.console_stream import console_subscriptions
 router=APIRouter(prefix="/auth",tags=["auth"])
 @router.get("/login")
 def login(db:Session=Depends(get_db)):
@@ -35,5 +36,6 @@ async def callback(request:Request,code:str,state:str,db:Session=Depends(get_db)
 def logout(request:Request,csrf_token:str=Form(...),db:Session=Depends(get_db)):
     row=session_from_request(request,db)
     if not row: raise HTTPException(401,"Authentication required")
-    require_csrf(request,row,csrf_token); db.delete(row); db.commit()
+    require_csrf(request,row,csrf_token); user_id=row.user_id; db.delete(row); db.commit()
+    if user_id: console_subscriptions.revoke(user_id)
     response=RedirectResponse("/",303); response.delete_cookie(COOKIE); return response

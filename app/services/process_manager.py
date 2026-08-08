@@ -13,6 +13,7 @@ class SupervisorBackend(Protocol):
     async def action(self,bot_id:str,action:str)->dict: ...
     async def health(self)->dict: ...
     async def reconcile(self)->list[dict]: ...
+    async def console(self,bot_id:str,after:int=0)->dict: ...
 
 class SupervisorClient:
     def __init__(self,url=None,secret=None,timeout=None):
@@ -28,6 +29,7 @@ class SupervisorClient:
     async def action(self,bot_id,action): return await self._request("POST",f"/internal/bots/{bot_id}/{action}")
     async def health(self): return await self._request("GET","/internal/health")
     async def reconcile(self): return await self._request("POST","/internal/reconcile")
+    async def console(self,bot_id,after=0): return await self._request("GET",f"/internal/bots/{bot_id}/console?after={after}")
 
 class BotProcessManager:
     """Stable application boundary for the independently running supervisor."""

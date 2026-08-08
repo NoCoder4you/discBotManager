@@ -34,8 +34,8 @@ class SupervisorService:
     Only bot IDs enter this boundary. Launch details always come from the trusted
     database registry, and persisted PID metadata is never sufficient by itself.
     """
-    def __init__(self, db_factory, stop_timeout: float = 10.0):
-        self.db_factory=db_factory; self.stop_timeout=stop_timeout; self.instance_id=f"SUP-{uuid.uuid4()}"
+    def __init__(self, db_factory, stop_timeout: float = 10.0, console_capture=None):
+        self.db_factory=db_factory; self.stop_timeout=stop_timeout; self.console_capture=console_capture; self.instance_id=f"SUP-{uuid.uuid4()}"
         self._locks: dict[str, threading.Lock]={}; self._guard=threading.Lock()
 
     def _lock(self, bot_id: str) -> threading.Lock:
@@ -124,9 +124,10 @@ class SupervisorService:
                 environment.update({"BOT_MANAGEMENT_BOT_ID":bot.id,"BOT_MANAGEMENT_SECRET":management_secret,"BOT_MANAGEMENT_HEARTBEAT_URL":f"http://{get_settings().supervisor_host}:{get_settings().supervisor_port}/internal/agent/heartbeat","BOT_HEARTBEAT_INTERVAL_SECONDS":str(get_settings().bot_heartbeat_interval_seconds)})
                 flags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name=="nt" else 0
                 try:
-                    process=subprocess.Popen([executable,entry],cwd=cwd,env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=os.name!="nt",creationflags=flags)
+                    process=subprocess.Popen([executable,entry],cwd=cwd,env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE if self.console_capture else subprocess.DEVNULL,stderr=subprocess.PIPE if self.console_capture else subprocess.DEVNULL,bufsize=0,start_new_session=os.name!="nt",creationflags=flags)
                     observed=psutil.Process(process.pid); created=datetime.fromtimestamp(observed.create_time(),timezone.utc)
                     row.pid=process.pid; row.process_created_at=created; row.started_at=created; row.state="running"; db.commit()
+                    if self.console_capture: self.console_capture.redactor.add_secrets((management_secret,)); self.console_capture.attach(process,bot.id,instance_id)
                     return self._payload(row)
                 except (OSError,psutil.Error) as exc:
                     row.state="crashed"; row.expected_running=True; row.ended_at=utcnow(); db.commit(); raise SupervisorConflict("Bot process could not be launched") from exc
@@ -147,7 +148,9 @@ class SupervisorService:
                 row.state="stopping"; row.expected_running=False; db.commit(); process=psutil.Process(row.pid); process.terminate()
                 try: code=process.wait(timeout=self.stop_timeout)
                 except psutil.TimeoutExpired: process.kill(); code=process.wait(timeout=self.stop_timeout)
-                row.exit_code=code; row.ended_at=utcnow(); row.state="offline"; db.commit(); return self._payload(row)
+                row.exit_code=code; row.ended_at=utcnow(); row.state="offline"; db.commit()
+                if self.console_capture: self.console_capture.ended(bot.id,row.instance_id)
+                return self._payload(row)
         finally: self._lock(bot_id).release()
 
     def restart(self,bot_id: str) -> dict:
@@ -163,12 +166,15 @@ class SupervisorService:
                 try: row.exit_code=process.wait(timeout=self.stop_timeout)
                 except psutil.TimeoutExpired: process.kill(); row.exit_code=process.wait(timeout=self.stop_timeout)
                 row.ended_at=utcnow(); row.state="offline"; db.commit()
+                if self.console_capture: self.console_capture.ended(bot.id,row.instance_id)
                 executable,entry,cwd=self._configuration(bot); instance_id=f"INST-{uuid.uuid4()}"
                 management_secret=secrets.token_urlsafe(48); bot.management_secret_hash=hashlib.sha256(management_secret.encode()).hexdigest()
                 new=BotInstance(bot_id=bot.id,instance_id=instance_id,state="starting",expected_running=True,python_executable=executable,entry_file=entry,working_directory=cwd,supervisor_instance_id=self.instance_id); db.add(new); db.commit()
                 env={k:v for k,v in os.environ.items() if k in {"PATH","HOME","USER","LOGNAME","LANG","LC_ALL","TMPDIR","TEMP","TMP","SYSTEMROOT","WINDIR"}}; env.update({"BOT_INSTANCE_ID":instance_id,"BOT_MANAGEMENT_BOT_ID":bot.id,"BOT_MANAGEMENT_SECRET":management_secret,"BOT_MANAGEMENT_HEARTBEAT_URL":f"http://{get_settings().supervisor_host}:{get_settings().supervisor_port}/internal/agent/heartbeat","BOT_HEARTBEAT_INTERVAL_SECONDS":str(get_settings().bot_heartbeat_interval_seconds)})
-                process=subprocess.Popen([executable,entry],cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=os.name!="nt",creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name=="nt" else 0)
-                created=datetime.fromtimestamp(psutil.Process(process.pid).create_time(),timezone.utc); new.pid=process.pid; new.process_created_at=created; new.started_at=created; new.state="running"; db.commit(); return self._payload(new)
+                process=subprocess.Popen([executable,entry],cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE if self.console_capture else subprocess.DEVNULL,stderr=subprocess.PIPE if self.console_capture else subprocess.DEVNULL,bufsize=0,start_new_session=os.name!="nt",creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name=="nt" else 0)
+                created=datetime.fromtimestamp(psutil.Process(process.pid).create_time(),timezone.utc); new.pid=process.pid; new.process_created_at=created; new.started_at=created; new.state="running"; db.commit()
+                if self.console_capture: self.console_capture.redactor.add_secrets((management_secret,)); self.console_capture.attach(process,bot.id,instance_id)
+                return self._payload(new)
         finally: self._lock(bot_id).release()
 
     def reconcile(self,bot_id: str | None=None) -> list[dict]:

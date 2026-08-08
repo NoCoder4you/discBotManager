@@ -1,12 +1,19 @@
 import hmac
+import os
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from app.core.config import get_settings
 from app.database import SessionLocal
 from app.supervisor.service import BotNotRegistered, IdentityMismatch, SupervisorConflict, SupervisorService
 from app.schemas import AgentHeartbeat
 from app.services.heartbeat import HeartbeatRejected, HeartbeatService
+from app.services.console import ConsoleBroker, ConsoleCapture, SecretRedactor
 
-settings=get_settings(); service=SupervisorService(SessionLocal,settings.supervisor_stop_timeout)
+settings=get_settings()
+known=[settings.app_secret,settings.supervisor_secret,settings.discord_client_secret,settings.database_url]
+known.extend(value for key,value in os.environ.items() if any(word in key.upper() for word in ("TOKEN","SECRET","PASSWORD","API_KEY")))
+console_broker=ConsoleBroker(settings.console_buffer_lines)
+console_capture=ConsoleCapture(console_broker,SecretRedactor(known),settings.console_log_root,settings.console_max_line_length,settings.console_log_max_bytes,settings.console_log_backup_count)
+service=SupervisorService(SessionLocal,settings.supervisor_stop_timeout,console_capture)
 heartbeat_service=HeartbeatService(SessionLocal,settings.bot_heartbeat_clock_skew_seconds,settings.bot_heartbeat_min_interval_seconds,settings.bot_heartbeat_timeout_seconds)
 app=FastAPI(title="Bot Process Supervisor",docs_url=None,redoc_url=None,openapi_url=None)
 
@@ -30,6 +37,10 @@ def health(): return service.health()
 def processes(): return call("reconcile")
 @app.get("/internal/bots/{bot_id}",dependencies=[Depends(authenticated)])
 def status(bot_id:str): return call("status",bot_id)
+@app.get("/internal/bots/{bot_id}/console",dependencies=[Depends(authenticated)])
+def console(bot_id:str,after:int=0,limit:int=1000):
+    call("status",bot_id)
+    return {"stream_id":console_broker.stream_id,"records":console_broker.records(bot_id,max(0,after),min(max(1,limit),1000)),"capture_available":bot_id in console_capture.persistence_available}
 @app.post("/internal/bots/{bot_id}/start",dependencies=[Depends(authenticated)])
 def start(bot_id:str): return call("start",bot_id)
 @app.post("/internal/bots/{bot_id}/stop",dependencies=[Depends(authenticated)])
