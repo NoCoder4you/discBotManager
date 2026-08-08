@@ -6,7 +6,8 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from app.auth.dependencies import current_user, requires_bot_permission, requires_owner
 from app.database import get_db
-from app.models import Bot, PlatformRole, User
+from app.models import Backup, Bot, PlatformRole, User, VerificationStatus
+from sqlalchemy import func, select
 from app.services.permissions import PermissionService
 from app.core.security import session_from_request
 from app.core.security import require_csrf
@@ -24,10 +25,16 @@ router=APIRouter()
 def home(request:Request): return request.app.state.templates.TemplateResponse(request,"login.html",{})
 @router.get("/dashboard",response_class=HTMLResponse)
 def dashboard(request:Request,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    bots=PermissionService(db).visible_bots(user); session=session_from_request(request,db); return request.app.state.templates.TemplateResponse(request,"dashboard.html",{"user":user,"bots":bots,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token})
+    bots=PermissionService(db).visible_bots(user); session=session_from_request(request,db); backup_health=None
+    if user.platform_role is PlatformRole.OWNER:
+        protected=db.scalar(select(func.count(func.distinct(Backup.bot_id))).where(Backup.verification_status==VerificationStatus.VERIFIED)) or 0
+        failed=db.scalar(select(func.count(Backup.id)).where(Backup.verification_status==VerificationStatus.FAILED)) or 0
+        latest=db.scalar(select(func.max(Backup.created_at)).where(Backup.verification_status==VerificationStatus.VERIFIED))
+        backup_health={"protected":protected,"total":len(bots),"failed":failed,"latest":latest}
+    return request.app.state.templates.TemplateResponse(request,"dashboard.html",{"user":user,"bots":bots,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token,"backup_health":backup_health})
 @router.get("/bots/{bot_id}",response_class=HTMLResponse)
 def bot_detail(request:Request,bot:Bot=Depends(requires_bot_permission("bot.view")),user:User=Depends(current_user),db:Session=Depends(get_db)):
-    session=session_from_request(request,db); permissions={key:PermissionService(db).has(user,key,bot.id) for key in ("bot.start","bot.stop","bot.restart","console.view")}; return request.app.state.templates.TemplateResponse(request,"bot.html",{"user":user,"bot":bot,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token,"permissions":permissions})
+    session=session_from_request(request,db); permissions={key:PermissionService(db).has(user,key,bot.id) for key in ("bot.start","bot.stop","bot.restart","console.view","backups.view")}; return request.app.state.templates.TemplateResponse(request,"bot.html",{"user":user,"bot":bot,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token,"permissions":permissions})
 @router.get("/bots/{bot_id}/console",response_class=HTMLResponse)
 def console_page(request:Request,bot:Bot=Depends(requires_bot_permission("console.view")),user:User=Depends(current_user),db:Session=Depends(get_db)):
     session=session_from_request(request,db); return request.app.state.templates.TemplateResponse(request,"console.html",{"user":user,"bot":bot,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token})

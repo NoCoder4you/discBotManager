@@ -9,10 +9,13 @@ def utcnow(): return datetime.now(timezone.utc)
 class PlatformRole(str, enum.Enum): OWNER="owner"; ADMINISTRATOR="administrator"; OPERATOR="operator"; VIEWER="viewer"
 class Effect(str, enum.Enum): GRANT="grant"; DENY="deny"
 class OperationStatus(str, enum.Enum): QUEUED="queued"; RUNNING="running"; COMPLETED="completed"; FAILED="failed"
+class BackupType(str, enum.Enum): MANUAL="manual"; PRE_EDIT="pre_edit"; PRE_RESTORE="pre_restore"; AUTOMATIC="automatic"; HOURLY="hourly"; DAILY="daily"; WEEKLY="weekly"; MONTHLY="monthly"; SYSTEM="system"
+class VerificationStatus(str, enum.Enum): UNVERIFIED="unverified"; VERIFIED="verified"; FAILED="failed"
+class RestorePolicy(str, enum.Enum): REQUIRES_STOP="requires_stop"; SUPPORTS_LIVE="supports_live"
 class User(Base):
     __tablename__="users"; id: Mapped[int]=mapped_column(primary_key=True); discord_id: Mapped[str]=mapped_column(String(32),unique=True,index=True); username: Mapped[str]=mapped_column(String(100)); display_name: Mapped[str]=mapped_column(String(100)); avatar: Mapped[str|None]=mapped_column(String(255)); platform_role: Mapped[PlatformRole]=mapped_column(Enum(PlatformRole),default=PlatformRole.VIEWER); enabled: Mapped[bool]=mapped_column(Boolean,default=True); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow); last_login: Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
 class Bot(Base):
-    __tablename__="bots"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=lambda:str(uuid.uuid4())); display_name: Mapped[str]=mapped_column(String(100)); description: Mapped[str]=mapped_column(Text,default=""); folder: Mapped[str]=mapped_column(String(500)); entry_file: Mapped[str]=mapped_column(String(255)); python_executable: Mapped[str]=mapped_column(String(500),default="python"); accent_colour: Mapped[str]=mapped_column(String(7),default="#5865f2"); enabled: Mapped[bool]=mapped_column(Boolean,default=True); owner_id: Mapped[int|None]=mapped_column(ForeignKey("users.id")); auto_restart: Mapped[bool]=mapped_column(Boolean,default=False); adapter: Mapped[str]=mapped_column(String(200),default="base"); modules: Mapped[list]=mapped_column(JSON,default=list); data_roots: Mapped[list]=mapped_column(JSON,default=list); backup_roots: Mapped[list]=mapped_column(JSON,default=list); management_secret_hash: Mapped[str|None]=mapped_column(String(64),nullable=True)
+    __tablename__="bots"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=lambda:str(uuid.uuid4())); display_name: Mapped[str]=mapped_column(String(100)); description: Mapped[str]=mapped_column(Text,default=""); folder: Mapped[str]=mapped_column(String(500)); entry_file: Mapped[str]=mapped_column(String(255)); python_executable: Mapped[str]=mapped_column(String(500),default="python"); accent_colour: Mapped[str]=mapped_column(String(7),default="#5865f2"); enabled: Mapped[bool]=mapped_column(Boolean,default=True); owner_id: Mapped[int|None]=mapped_column(ForeignKey("users.id")); auto_restart: Mapped[bool]=mapped_column(Boolean,default=False); adapter: Mapped[str]=mapped_column(String(200),default="base"); modules: Mapped[list]=mapped_column(JSON,default=list); data_roots: Mapped[list]=mapped_column(JSON,default=list); backup_roots: Mapped[list]=mapped_column(JSON,default=list); management_secret_hash: Mapped[str|None]=mapped_column(String(64),nullable=True); backup_include: Mapped[list]=mapped_column(JSON,default=lambda:["**/*"]); backup_exclude: Mapped[list]=mapped_column(JSON,default=list); restore_policy: Mapped[RestorePolicy]=mapped_column(Enum(RestorePolicy),default=RestorePolicy.REQUIRES_STOP); source_version: Mapped[str|None]=mapped_column(String(100))
 class Role(Base):
     __tablename__="roles"; id: Mapped[int]=mapped_column(primary_key=True); key: Mapped[str]=mapped_column(String(80),unique=True); name: Mapped[str]=mapped_column(String(100)); scope: Mapped[str]=mapped_column(String(20),default="bot")
 class Permission(Base):
@@ -31,6 +34,27 @@ class AuditLog(Base):
     __tablename__="audit_log"; id: Mapped[int]=mapped_column(primary_key=True); timestamp: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow,index=True); discord_user_id: Mapped[str|None]=mapped_column(String(32)); user_display: Mapped[str|None]=mapped_column(String(100)); bot_id: Mapped[str|None]=mapped_column(ForeignKey("bots.id")); action: Mapped[str]=mapped_column(String(100)); target: Mapped[str|None]=mapped_column(String(255)); result: Mapped[str]=mapped_column(String(30)); event_metadata: Mapped[dict]=mapped_column(JSON,default=dict); operation_id: Mapped[str|None]=mapped_column(String(30))
 class ActivityEvent(Base):
     __tablename__="activity_events"; id: Mapped[int]=mapped_column(primary_key=True); timestamp: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow,index=True); event_type: Mapped[str]=mapped_column(String(100)); actor_id: Mapped[int|None]=mapped_column(ForeignKey("users.id")); bot_id: Mapped[str|None]=mapped_column(ForeignKey("bots.id")); payload: Mapped[dict]=mapped_column(JSON,default=dict)
+class Backup(Base):
+    __tablename__="backups"
+    id: Mapped[int]=mapped_column(primary_key=True)
+    public_id: Mapped[str]=mapped_column(String(30),unique=True,index=True)
+    bot_id: Mapped[str]=mapped_column(ForeignKey("bots.id"),index=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow,index=True)
+    created_by_id: Mapped[int|None]=mapped_column(ForeignKey("users.id"))
+    backup_type: Mapped[BackupType]=mapped_column(Enum(BackupType),index=True)
+    reason: Mapped[str|None]=mapped_column(String(200))
+    source_version: Mapped[str|None]=mapped_column(String(100))
+    size_bytes: Mapped[int]=mapped_column(Integer,default=0)
+    file_count: Mapped[int]=mapped_column(Integer,default=0)
+    verification_status: Mapped[VerificationStatus]=mapped_column(Enum(VerificationStatus),default=VerificationStatus.UNVERIFIED,index=True)
+    verification_error: Mapped[str|None]=mapped_column(String(255))
+    pinned: Mapped[bool]=mapped_column(Boolean,default=False,index=True)
+    protected: Mapped[bool]=mapped_column(Boolean,default=False,index=True)
+    restore_count: Mapped[int]=mapped_column(Integer,default=0)
+    operation_id: Mapped[str|None]=mapped_column(String(30))
+    archive_name: Mapped[str]=mapped_column(String(100),default="data.tar.gz")
+    manifest_name: Mapped[str]=mapped_column(String(100),default="manifest.json")
+    created_by: Mapped[User|None]=relationship()
 class BotInstance(Base):
     """Durable identity for one generation of a registered bot process."""
     __tablename__="bot_instances"

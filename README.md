@@ -252,3 +252,43 @@ Memory is the main managed process's resident set size (`memory_info().rss`) sto
 Both current and history APIs require the existing per-bot `bot.view` permission. Owner access, assignments, disabled users/assignments, explicit denies, and hidden-resource 404 behavior remain unchanged. The dashboard polls cached current data every five seconds and redraws lightweight Canvas CPU/RSS history every ten seconds.
 
 Telemetry failures are isolated from process state, Discord readiness, and console capture. A supervisor restart safely adopts and primes telemetry for identity-validated processes; its in-memory short-term history resets, but process uptime remains based on the original OS creation time. This stage does not include host temperature/load, disk/network metrics, process-tree RSS, alerting, or persistent long-term analytics.
+
+## Backup Architecture (Stage 4)
+
+Authenticated FastAPI routes reuse bot assignments, the canonical permission resolver, CSRF sessions, operations, audit logs, and structured events. `BackupService` is the only filesystem boundary. Every bot has one relative data root, include/exclude patterns, an optional source version, and a conservative restore policy. Browser requests contain bot and backup IDs only, never filesystem paths.
+
+### Creating a Backup
+
+`BACKUP_ROOT` is central storage outside live bot data. Snapshots live at `<BACKUP_ROOT>/<bot-id>/<BKP-id>/` as a finalized `data.tar.gz` and `manifest.json`. Creation streams regular files into an unlisted temporary directory, verifies it, then atomically renames it into place. `BKP-…` identifies the snapshot and a separate `ACT-…` operation tracks the action. Incomplete or failed rows are not restorable.
+
+The configured data root must resolve inside the registered bot folder. Walks never follow symlinks. Bot include patterns narrow the scope; excludes add to safe defaults for `.env*`, tokens, secrets, credentials, virtual environments, caches, Git data, logs, and backups. The store is rejected when it sits in selected live data. `BACKUP_MAX_SIZE_MB` and a reserved `BACKUP_MIN_FREE_MB` are checked before archive or staging work.
+
+### Backup Verification
+
+Manifests expose only relative POSIX paths, sizes, and SHA-256 checksums. Verification rejects absolute or traversing archive paths, links, unexpected/missing files, size or checksum differences, invalid included JSON, and failed SQLite integrity checks. Failed verification blocks normal restore. Preview compares current and archived checksums and reports added, removed, changed, or unchanged metadata; binary contents are never diffed or displayed.
+
+### Restore Process and Pre-Restore Backup
+
+Restore requires `backups.restore`, an eligible verified snapshot belonging to the same bot, CSRF, and typing the upper-case internal bot ID. That permission authorizes the predefined stop/restore/start workflow only; it does not grant arbitrary process controls. Every restore re-verifies the source and creates a verified, protected `PRE_RESTORE` safety snapshot. Failure to create it stops the restore.
+
+A reusable per-bot lock prevents colliding restores and is intended for future editors. Safe extraction writes a sibling staging directory and validates it. Same-filesystem atomic renames move live data to rollback storage and staging to live; final checksums are validated before rollback storage is removed. Failure atomically returns the original directory where possible and records whether rollback succeeded. Rollback failure remains protected and is a critical manual-intervention condition.
+
+### Bot Stop/Restart Restore Policies
+
+`REQUIRES_STOP` is the default. A running bot is controlled only through `BotProcessManager` and the supervisor, restarted after data validation, then observed for up to 60 seconds using the existing Discord Ready state. A Ready timeout is reported separately from successful data restoration. `SUPPORTS_LIVE` is available only when an owner knows atomic live replacement is safe.
+
+### Backup Retention and Pinned Backups
+
+The model supports hourly, daily, weekly, monthly, manual, pre-edit, pre-restore, automatic, and system categories. Count limits use `BACKUP_RETENTION_HOURLY`, `BACKUP_RETENTION_DAILY`, `BACKUP_RETENTION_WEEKLY`, `BACKUP_RETENTION_MONTHLY`, and `BACKUP_RETENTION_MANUAL`; zero disables count cleanup for that category. Cleanup preserves the newest configured count and always skips pinned or protected snapshots. Pre-restore snapshots remain protected while rollback needs them. Pin/unpin is initially owner-only and audited. Routine cleanup publishes one `SYSTEM` event without impersonating a human or creating per-file audit spam.
+
+### Permissions and Security
+
+* `backups.view` allows bot-scoped lists, safe details, and previews.
+* `backups.create` allows manual snapshots with a validated optional 200-character plain-text reason.
+* `backups.restore` is the critical-risk permission for the controlled recovery workflow.
+
+Unknown, unassigned, disabled, explicitly denied, wrong-bot, and guessed backup resources retain the existing non-enumerating 404 boundary. Cross-bot ownership is checked server-side for every detail, preview, pin, and restore. Human create, pin, restore request/result, and failure actions are audited without file contents; verification, restore, and retention transitions publish structured events. Download and manual deletion remain absent because the canonical catalog has no specific permissions for those sensitive actions.
+
+### Known limitations
+
+Filesystem work runs away from FastAPI's async event loop, but the operation worker is currently in-process rather than a durable external queue. Atomic directory exchange protects the replacement boundary and incomplete backup directories are never valid; automatic scheduling and restart-resumption of in-progress operations are deferred. One configured data root per bot is supported. Full text/JSON diff presentation, file editing, SQLite browsing, deployment history, and backup downloads are outside Stage 4.

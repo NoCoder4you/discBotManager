@@ -29,17 +29,19 @@ class AdminService:
         if not entry.is_relative_to(folder) or not entry.is_file(): raise AdminError("Entry file must exist within the bot folder")
         executable=Path(data.python_executable).resolve()
         if not executable.is_file(): raise AdminError("Python executable must be an existing file")
-        return folder,entry,executable
+        data_root=(folder/data.data_root).resolve()
+        if Path(data.data_root).is_absolute() or not data_root.is_relative_to(folder) or not data_root.is_dir(): raise AdminError("Data root must be an existing directory within the bot folder")
+        return folder,entry,executable,data_root
     def create_bot(self,actor:User,data:BotMutation):
         if self.db.get(Bot,data.id): raise AdminError("Bot ID is already registered")
-        folder,entry,executable=self.validate_paths(data)
-        bot=Bot(id=data.id,display_name=data.display_name,description=data.description,folder=str(folder),entry_file=str(entry.relative_to(folder)),python_executable=str(executable),accent_colour=data.accent_colour,enabled=data.enabled,owner_id=actor.id,adapter=data.adapter)
+        folder,entry,executable,data_root=self.validate_paths(data)
+        bot=Bot(id=data.id,display_name=data.display_name,description=data.description,folder=str(folder),entry_file=str(entry.relative_to(folder)),python_executable=str(executable),accent_colour=data.accent_colour,enabled=data.enabled,owner_id=actor.id,adapter=data.adapter,data_roots=[str(data_root.relative_to(folder))],backup_include=[x.strip() for x in data.backup_include.splitlines() if x.strip()],backup_exclude=[x.strip() for x in data.backup_exclude.splitlines() if x.strip()],restore_policy=data.restore_policy)
         self.db.add(bot); self.db.flush(); op=_event(self.db,actor,EventType.BOT_REGISTERED,bot.id,{"after":{"display_name":bot.display_name,"enabled":bot.enabled,"adapter":bot.adapter}},bot.id); self.db.commit(); return bot,op
     def update_bot(self,actor:User,bot:Bot,data:BotMutation):
         if data.id != bot.id: raise AdminError("Internal bot ID cannot be changed")
-        folder,entry,executable=self.validate_paths(data)
+        folder,entry,executable,data_root=self.validate_paths(data)
         before={"display_name":bot.display_name,"description":bot.description,"enabled":bot.enabled,"adapter":bot.adapter}
-        bot.display_name=data.display_name; bot.description=data.description; bot.folder=str(folder); bot.entry_file=str(entry.relative_to(folder)); bot.python_executable=str(executable); bot.accent_colour=data.accent_colour; bot.enabled=data.enabled; bot.adapter=data.adapter
+        bot.display_name=data.display_name; bot.description=data.description; bot.folder=str(folder); bot.entry_file=str(entry.relative_to(folder)); bot.python_executable=str(executable); bot.accent_colour=data.accent_colour; bot.enabled=data.enabled; bot.adapter=data.adapter; bot.data_roots=[str(data_root.relative_to(folder))]; bot.backup_include=[x.strip() for x in data.backup_include.splitlines() if x.strip()]; bot.backup_exclude=[x.strip() for x in data.backup_exclude.splitlines() if x.strip()]; bot.restore_policy=data.restore_policy
         after={"display_name":bot.display_name,"description":bot.description,"enabled":bot.enabled,"adapter":bot.adapter}
         op=_event(self.db,actor,EventType.BOT_CONFIGURATION_CHANGED,bot.id,{"before":before,"after":after},bot.id); self.db.commit(); return bot,op
     def assign(self,actor:User,target:User,data:AssignmentMutation):
