@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     telemetry_interval_seconds: float = Field(default=5,ge=1,le=300)
     telemetry_history_minutes: int = Field(default=60,ge=1,le=1440)
     telemetry_stale_after_seconds: float = Field(default=15,ge=2,le=900)
+    backup_root: str = "backups"
+    backup_max_size_mb: int = Field(default=512, ge=1, le=102400)
+    backup_min_free_mb: int = Field(default=128, ge=0, le=102400)
+    backup_retention_hourly: int = Field(default=24, ge=0, le=10000)
+    backup_retention_daily: int = Field(default=14, ge=0, le=10000)
+    backup_retention_weekly: int = Field(default=8, ge=0, le=10000)
+    backup_retention_monthly: int = Field(default=12, ge=0, le=10000)
+    backup_retention_manual: int = Field(default=0, ge=0, le=10000)
     @property
     def secure_cookies(self) -> bool: return self.environment == "production"
     @model_validator(mode="after")

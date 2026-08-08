@@ -80,13 +80,13 @@ def bots(request:Request,q:str=Query("",max_length=100),page:int=Query(1,ge=1),o
     rows=list(db.scalars(stmt.order_by(Bot.display_name).offset((page-1)*25).limit(25)))
     return request.app.state.templates.TemplateResponse(request,"admin_bots.html",page_context(request,db,owner,bots=rows,q=q,page=page))
 @router.post("/bots")
-def create_bot(request:Request,id:str=Form(...),display_name:str=Form(...),description:str=Form(""),folder:str=Form(...),entry_file:str=Form(...),python_executable:str=Form(...),accent_colour:str=Form("#5865f2"),enabled:bool=Form(False),adapter:str=Form("python"),csrf_token:str=Form(...),owner:User=Depends(requires_owner),db:Session=Depends(get_db)):
+def create_bot(request:Request,id:str=Form(...),display_name:str=Form(...),description:str=Form(""),folder:str=Form(...),entry_file:str=Form(...),python_executable:str=Form(...),accent_colour:str=Form("#5865f2"),enabled:bool=Form(False),adapter:str=Form("python"),data_root:str=Form("."),backup_include:str=Form("**/*"),backup_exclude:str=Form(""),restore_policy:str=Form("requires_stop"),csrf_token:str=Form(...),owner:User=Depends(requires_owner),db:Session=Depends(get_db)):
     validate_csrf(request,db,csrf_token); data=parsed(BotMutation,locals())
     try: _,op=AdminService(db).create_bot(owner,data)
     except AdminError as exc: raise HTTPException(422,str(exc)) from exc
     return redirect("/admin/bots",op)
 @router.post("/bots/{bot_id}")
-def update_bot(bot_id:str,request:Request,id:str=Form(...),display_name:str=Form(...),description:str=Form(""),folder:str=Form(...),entry_file:str=Form(...),python_executable:str=Form(...),accent_colour:str=Form("#5865f2"),enabled:bool=Form(False),adapter:str=Form("python"),csrf_token:str=Form(...),owner:User=Depends(requires_owner),db:Session=Depends(get_db)):
+def update_bot(bot_id:str,request:Request,id:str=Form(...),display_name:str=Form(...),description:str=Form(""),folder:str=Form(...),entry_file:str=Form(...),python_executable:str=Form(...),accent_colour:str=Form("#5865f2"),enabled:bool=Form(False),adapter:str=Form("python"),data_root:str=Form("."),backup_include:str=Form("**/*"),backup_exclude:str=Form(""),restore_policy:str=Form("requires_stop"),csrf_token:str=Form(...),owner:User=Depends(requires_owner),db:Session=Depends(get_db)):
     validate_csrf(request,db,csrf_token); bot=db.get(Bot,bot_id)
     if not bot: raise HTTPException(404,"Resource not found")
     data=parsed(BotMutation,locals())
