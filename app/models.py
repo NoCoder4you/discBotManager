@@ -31,3 +31,20 @@ class AuditLog(Base):
     __tablename__="audit_log"; id: Mapped[int]=mapped_column(primary_key=True); timestamp: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow,index=True); discord_user_id: Mapped[str|None]=mapped_column(String(32)); user_display: Mapped[str|None]=mapped_column(String(100)); bot_id: Mapped[str|None]=mapped_column(ForeignKey("bots.id")); action: Mapped[str]=mapped_column(String(100)); target: Mapped[str|None]=mapped_column(String(255)); result: Mapped[str]=mapped_column(String(30)); event_metadata: Mapped[dict]=mapped_column(JSON,default=dict); operation_id: Mapped[str|None]=mapped_column(String(30))
 class ActivityEvent(Base):
     __tablename__="activity_events"; id: Mapped[int]=mapped_column(primary_key=True); timestamp: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow,index=True); event_type: Mapped[str]=mapped_column(String(100)); actor_id: Mapped[int|None]=mapped_column(ForeignKey("users.id")); bot_id: Mapped[str|None]=mapped_column(ForeignKey("bots.id")); payload: Mapped[dict]=mapped_column(JSON,default=dict)
+class BotInstance(Base):
+    """Durable identity for one generation of a registered bot process."""
+    __tablename__="bot_instances"
+    id: Mapped[int]=mapped_column(primary_key=True)
+    bot_id: Mapped[str]=mapped_column(ForeignKey("bots.id"),index=True)
+    instance_id: Mapped[str]=mapped_column(String(41),unique=True,index=True)
+    pid: Mapped[int|None]=mapped_column(Integer,index=True)
+    process_created_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow)
+    ended_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+    exit_code: Mapped[int|None]=mapped_column(Integer)
+    expected_running: Mapped[bool]=mapped_column(Boolean,default=False,index=True)
+    state: Mapped[str]=mapped_column(String(20),default="offline")
+    python_executable: Mapped[str]=mapped_column(String(500))
+    entry_file: Mapped[str]=mapped_column(String(500))
+    working_directory: Mapped[str]=mapped_column(String(500))
+    supervisor_instance_id: Mapped[str|None]=mapped_column(String(41))
