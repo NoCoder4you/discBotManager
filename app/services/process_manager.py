@@ -53,6 +53,7 @@ class SupervisorClient:
     async def configure_schedule(self,bot_id,task_id,payload): return await self._request("PUT",f"/internal/scheduler/bots/{bot_id}/tasks/{task_id}",payload)
     async def toggle_schedule(self,bot_id,task_id,enabled): return await self._request("PATCH",f"/internal/scheduler/bots/{bot_id}/tasks/{task_id}",{"enabled":enabled})
     async def run_task(self,bot_id,task_id,payload): return await self._request("POST",f"/internal/scheduler/bots/{bot_id}/tasks/{task_id}/runs",payload)
+    async def request_guild_snapshot(self,bot_id): return await self._request("POST",f"/internal/bots/{bot_id}/guild-snapshot/refresh")
 
 class BotProcessManager:
     """Stable application boundary for the independently running supervisor."""

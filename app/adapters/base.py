@@ -41,6 +41,14 @@ class DatabaseSource:
     @property
     def mutation_policy(self)->DatabaseEditPolicy:
         return self.edit_policy or (DatabaseEditPolicy.LIVE_EDIT_SUPPORTED if self.live_edit_supported else DatabaseEditPolicy.EDIT_REQUIRES_BOT_STOP)
+@dataclass(frozen=True)
+class DiscordCapability:
+    """Trusted, adapter-owned declaration used only for read-only diagnostics."""
+    id:str; name:str; description:str=""; severity:str="HIGH"
+    required_guild_permissions:tuple[str,...]=()
+    channel_id:str|None=None; channel_id_setting:str|None=None
+    required_channel_permissions:tuple[str,...]=(); allowed_channel_types:tuple[str,...]=()
+    role_id:str|None=None; role_id_setting:str|None=None; requires_role_management:bool=False
 class BaseBotAdapter(ABC):
     supports_heartbeat: bool=False
     supports_discord_status: bool=False
@@ -55,3 +63,4 @@ class BaseBotAdapter(ABC):
     def get_quick_actions(self)->tuple[QuickAction,...]: return ()
     def get_tasks(self)->tuple[RegisteredTask,...]: return ()
     def get_custom_permissions(self)->tuple[str,...]: return ()
+    def get_discord_capabilities(self)->tuple[DiscordCapability,...]: return ()

@@ -98,6 +98,16 @@ class BotInstance(Base):
     last_disconnect_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
     discord_latency_ms: Mapped[float|None]=mapped_column()
     guild_count: Mapped[int|None]=mapped_column(Integer)
+class DiscordGuildSnapshot(Base):
+    """One compact, atomically replaced diagnostic snapshot per bot/guild."""
+    __tablename__="discord_guild_snapshots"; __table_args__=(UniqueConstraint("bot_id","guild_id",name="uq_discord_snapshot_bot_guild"),)
+    id:Mapped[int]=mapped_column(primary_key=True); bot_id:Mapped[str]=mapped_column(ForeignKey("bots.id"),index=True); guild_id:Mapped[str]=mapped_column(String(32),index=True)
+    instance_id:Mapped[str]=mapped_column(String(41),index=True); generated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True)); received_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow)
+    payload:Mapped[dict]=mapped_column(JSON); diagnostics:Mapped[list]=mapped_column(JSON,default=list)
+class DiscordDiagnosticState(Base):
+    __tablename__="discord_diagnostic_states"; __table_args__=(UniqueConstraint("bot_id","fingerprint",name="uq_discord_diagnostic_state"),)
+    id:Mapped[int]=mapped_column(primary_key=True); bot_id:Mapped[str]=mapped_column(ForeignKey("bots.id"),index=True); guild_id:Mapped[str]=mapped_column(String(32),index=True)
+    fingerprint:Mapped[str]=mapped_column(String(64)); status:Mapped[str]=mapped_column(String(12)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow)
 class TaskSchedule(Base):
     __tablename__="task_schedules"; __table_args__=(UniqueConstraint("bot_id","task_id"),)
     id:Mapped[int]=mapped_column(primary_key=True); bot_id:Mapped[str]=mapped_column(ForeignKey("bots.id"),index=True); task_id:Mapped[str]=mapped_column(String(64),index=True)

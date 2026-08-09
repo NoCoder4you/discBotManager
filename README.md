@@ -522,3 +522,33 @@ Every bot incident read requires a current assignment with `errors.view`; Owner 
 Incident access does **not** grant adjacent permissions. Raw console excerpts require `console.view`; task/run detail requires `scheduler.view`; backup identifiers require `backups.view`; and database identifiers require `database.view`. Safe high-level failure wording remains visible. No incident route can restart a bot, rerun a task, restore a backup, edit data, execute code, notify users, or alter the authoritative bot state. Incident detection performs no automatic remediation; existing supervisor behaviour remains completely separate.
 
 Incident records are durably retained and paginated. No deletion or aggressive critical-incident cleanup is implemented in Stage 8.
+
+## Discord Diagnostics Architecture (Stage 9)
+
+Stage 9 uses a strictly read-only data path: **Discord → managed bot (`discord.py`) → authenticated management agent → validated guild snapshot → cached permission diagnostics → permission-scoped dashboard**. FastAPI never logs managed bots into Discord and the browser never receives bot tokens, agent credentials, OAuth credentials, webhook data, or a direct Discord API connection.
+
+### Permissions and bot scope
+
+Every Servers page and API uses the existing `servers.view` permission after enabled-account, enabled-assignment, and bot visibility checks. Explicit denial retains precedence. Guild IDs are resolved beneath an already-authorised bot route, so two bots in one guild remain separate bot-guild integrations and guessed guild IDs return the same non-enumerating not-found response.
+
+### Guild snapshots and caching
+
+The dependency-light management agent derives bounded metadata from the running client's cached `Guild`, bot `Member`, roles, channels, `Member.guild_permissions`, and `channel.permissions_for(bot_member)`. It sends snapshots separately from heartbeats on Ready, relevant guild/channel/role/bot-member changes, periodic safety refreshes, and rate-limited dashboard requests. The authenticated supervisor endpoint validates the agent credential, current `INST-…` generation, timestamp, process state, payload bytes, role count, channel count, canonical string IDs, and channel types before atomically replacing the current cache. Only current snapshots are retained; no messages or member directory are collected.
+
+Snapshots retain generated/received timestamps and their instance ID. A Ready matching instance is `CURRENT`; a recent snapshot while disconnected or from a replaced instance is `CACHED`; data older than `DISCORD_SNAPSHOT_STALE_SECONDS` is `STALE`, and certainty-dependent diagnostic results become `UNKNOWN`. No snapshot is `UNAVAILABLE` unless no cache exists. A dashboard restart reloads the compact cache from the database.
+
+### Role hierarchy and channel permissions
+
+Roles are displayed in Discord position order with managed and bot-held roles marked. Diagnostics select the highest bot-held, non-managed role by Discord position (with snowflake ordering as the equal-position tie-break) and require a strictly greater position for role management. Managed targets always fail role-management checks. Administrator satisfies permission-bit checks but never bypasses hierarchy or managed-role restrictions.
+
+The agent relies on discord.py's authoritative `guild.me.guild_permissions` and `channel.permissions_for(guild.me)`. Consequently `@everyone`, combined role overwrites, member overwrites, category synchronisation, and Administrator semantics are resolved by discord.py rather than approximated by FastAPI. The UI maps canonical snake-case permission names to readable labels and safely tolerates names added by future discord.py releases.
+
+### Registered capabilities and transitions
+
+Adapters declare trusted `DiscordCapability` records through `get_discord_capabilities()`: required guild/channel permissions, a configured target channel and allowed types, or a target role and role-management requirement. The central `GuildSnapshotService` reports `PASS`, `WARNING`, `FAIL`, or (for stale data) `UNKNOWN`, with `INFO` through `CRITICAL` severity. Missing declared permissions, missing/wrong channel targets, missing/managed role targets, and equal/higher role conflicts are checked independently; undeclared permissions are not labelled failures.
+
+Stable bot/guild/capability/target fingerprints persist only current status. A prior `PASS` changing to `FAIL` emits one `DISCORD_CAPABILITY_FAILED` activity event; recovery emits one `DISCORD_CAPABILITY_RECOVERED`; unchanged refreshes emit nothing. Guild joins/removals similarly produce bounded operational activity. UI routes never create incidents.
+
+### Stage 9 security boundary
+
+Stage 9 provides **no Discord server mutation**: no automatic fixes, role creation/deletion/reordering/assignment, channel creation/deletion/overwrite changes, message or webhook sending, invites, kicks, bans, timeouts, nickname changes, member directory, arbitrary REST requests, or arbitrary Discord API calls. All effective permission changes must be performed externally in Discord and then observed through a fresh snapshot.
