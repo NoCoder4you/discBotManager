@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable
+import uuid
 from sqlalchemy.orm import Session
 from app.models import ActivityEvent, AuditLog, User
 class EventType(str,Enum):
@@ -19,12 +20,14 @@ class EventType(str,Enum):
     TASK_RUN_REQUESTED="TASK_RUN_REQUESTED"; TASK_SCHEDULE_ENABLED="TASK_SCHEDULE_ENABLED"; TASK_SCHEDULE_DISABLED="TASK_SCHEDULE_DISABLED"; TASK_SCHEDULE_CHANGED="TASK_SCHEDULE_CHANGED"
 @dataclass(frozen=True)
 class DomainEvent:
-    type:EventType; actor:User|None=None; bot_id:str|None=None; payload:dict[str,Any]=field(default_factory=dict); timestamp:datetime=field(default_factory=lambda:datetime.now(timezone.utc))
+    type:EventType; actor:User|None=None; bot_id:str|None=None; payload:dict[str,Any]=field(default_factory=dict); timestamp:datetime=field(default_factory=lambda:datetime.now(timezone.utc)); event_id:str=field(default_factory=lambda:str(uuid.uuid4()))
 class EventBus:
     """Synchronous transaction-scoped publisher; consumers can be replaced later."""
     def __init__(self,db:Session): self.db=db; self.consumers:list[Callable[[DomainEvent],None]]=[]
     def publish(self,event:DomainEvent)->None:
-        self.db.add(ActivityEvent(timestamp=event.timestamp,event_type=event.type.value,actor_id=event.actor.id if event.actor else None,bot_id=event.bot_id,payload=event.payload))
+        activity=ActivityEvent(timestamp=event.timestamp,event_type=event.type.value,actor_id=event.actor.id if event.actor else None,bot_id=event.bot_id,payload=event.payload); self.db.add(activity); self.db.flush()
+        from app.services.incidents import IncidentService
+        IncidentService(self.db).process(event,activity)
         for consumer in self.consumers: consumer(event)
 class AuditService:
     """The service intentionally exposes append only; no update/delete API exists."""

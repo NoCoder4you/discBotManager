@@ -490,3 +490,35 @@ The scheduler provides:
 
 Trusted tasks that mutate files or databases remain responsible for using the
 existing backup, data, database, and process-aware lock services from Stages 4–6.
+
+## Stage 8 — Incident architecture
+
+Stage 8 is a durable, read-only projection of trusted platform events:
+
+```text
+Existing Events → IncidentService → Incident / Error Group → Timeline → Permission-Scoped UI
+```
+
+`EventBus` persists each structured activity event and synchronously passes its durable ID to `IncidentService`. The detector accepts only its fixed event allow-list; browser users cannot submit incident payloads or rules. Detection begins with events emitted after this migration rather than reconstructing all historical logs. Existing incidents survive application restarts.
+
+### Incident types and severity
+
+The initial canonical bot incident types are `BOT_CRASH` (HIGH), `CRASH_LOOP` (CRITICAL), `DISCORD_DISCONNECT` (MEDIUM), `READY_TIMEOUT` (HIGH), `TASK_FAILURE` (MEDIUM), `TASK_TIMEOUT` (HIGH), `DATABASE_EDIT_FAILURE` (HIGH), `DATABASE_RECOVERY_FAILURE` (CRITICAL), `BACKUP_FAILURE` (HIGH), and `RESTORE_FAILURE` (CRITICAL). `SUPERVISOR_UNAVAILABLE` is a HIGH platform incident. Console and telemetry availability remain represented by their existing live status because the current event bus does not emit durable server-side threshold transitions for them; browser WebSocket failures never create incidents.
+
+Availability incidents remain `OPEN` until an objective trusted recovery event resolves them automatically. Completed failure facts (task, database, and backup failures) are stored as `RESOLVED` with resolution `OCCURRED`; this records the failure without inventing a manual ticket workflow. A repeated failure after recovery creates a new incident. Three crashes in five minutes promote the newest incident to `CRASH_LOOP`. Incident triage acknowledgement and notes are deliberately deferred: the existing permission catalog contains `errors.acknowledge`, but no pre-existing safe triage workflow exists.
+
+### Correlation, timelines, and error grouping
+
+Correlation uses `bot_id` plus strong metadata already supplied by events: instance, task, run, operation, and backup IDs. Recovery targets the newest matching open incident for the same bot. Each timeline row references its source activity-event ID and has a unique `(source event key, event code)` constraint, making duplicate delivery idempotent. UTC timestamp plus row ID provides deterministic display order.
+
+Error fingerprints hash the bot, canonical incident type, normalised redacted signature, and the strongest available task/instance/operation key. Timestamps, UUIDs, addresses, and numeric values are normalised. Exception type, safe final message, and the top relevant Python frame are used when present. Equal fingerprints update one durable error group (`first_seen`, `last_seen`, and `occurrence_count`) while individual incidents remain available.
+
+Context is an allow-listed, bounded snapshot rather than a copy of raw event payloads. It can include process instance/PID/exit/uptime and heartbeat fields, a recent CPU/RSS sample, task/run/trigger/duration/operation identifiers, safe database/backup identifiers, and a bounded console excerpt when an existing producer supplies them. All text uses the console secret redactor before persistence; tracebacks are capped and absolute Python paths are shortened. Templates render text through Jinja autoescaping, never as HTML.
+
+### Incident permissions and read-only principle
+
+Every bot incident read requires a current assignment with `errors.view`; Owner can view all bot and platform incidents. Search, filters, pagination totals, dashboard counts, incident IDs, and error groups are scoped in the database query before results are returned. Hidden resources return the standard 404 response.
+
+Incident access does **not** grant adjacent permissions. Raw console excerpts require `console.view`; task/run detail requires `scheduler.view`; backup identifiers require `backups.view`; and database identifiers require `database.view`. Safe high-level failure wording remains visible. No incident route can restart a bot, rerun a task, restore a backup, edit data, execute code, notify users, or alter the authoritative bot state. Incident detection performs no automatic remediation; existing supervisor behaviour remains completely separate.
+
+Incident records are durably retained and paginated. No deletion or aggressive critical-incident cleanup is implemented in Stage 8.

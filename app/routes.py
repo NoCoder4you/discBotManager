@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from app.auth.dependencies import current_user, requires_bot_permission, requires_owner
 from app.database import get_db
-from app.models import Backup, Bot, PlatformRole, User, VerificationStatus
+from app.models import Backup, Bot, Incident, IncidentSeverity, IncidentStatus, PlatformRole, User, VerificationStatus
 from sqlalchemy import func, select
 from app.services.permissions import PermissionService
 from app.core.security import session_from_request
@@ -31,10 +31,13 @@ def dashboard(request:Request,user:User=Depends(current_user),db:Session=Depends
         failed=db.scalar(select(func.count(Backup.id)).where(Backup.verification_status==VerificationStatus.FAILED)) or 0
         latest=db.scalar(select(func.max(Backup.created_at)).where(Backup.verification_status==VerificationStatus.VERIFIED))
         backup_health={"protected":protected,"total":len(bots),"failed":failed,"latest":latest}
-    return request.app.state.templates.TemplateResponse(request,"dashboard.html",{"user":user,"bots":bots,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token,"backup_health":backup_health})
+    incident_bot_ids=[bot.id for bot in bots if PermissionService(db).has(user,"errors.view",bot.id)]
+    incident_filter=[] if user.platform_role is PlatformRole.OWNER else [Incident.bot_id.in_(incident_bot_ids)]
+    incident_health={"open":db.scalar(select(func.count(Incident.id)).where(Incident.status==IncidentStatus.OPEN,*incident_filter)) or 0,"high":db.scalar(select(func.count(Incident.id)).where(Incident.status==IncidentStatus.OPEN,Incident.severity==IncidentSeverity.HIGH,*incident_filter)) or 0,"critical":db.scalar(select(func.count(Incident.id)).where(Incident.status==IncidentStatus.OPEN,Incident.severity==IncidentSeverity.CRITICAL,*incident_filter)) or 0}
+    return request.app.state.templates.TemplateResponse(request,"dashboard.html",{"user":user,"bots":bots,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token,"backup_health":backup_health,"incident_health":incident_health})
 @router.get("/bots/{bot_id}",response_class=HTMLResponse)
 def bot_detail(request:Request,bot:Bot=Depends(requires_bot_permission("bot.view")),user:User=Depends(current_user),db:Session=Depends(get_db)):
-    session=session_from_request(request,db); permissions={key:PermissionService(db).has(user,key,bot.id) for key in ("bot.start","bot.stop","bot.restart","console.view","backups.view","files.view","config.view","database.view","scheduler.view")}; return request.app.state.templates.TemplateResponse(request,"bot.html",{"user":user,"bot":bot,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token,"permissions":permissions})
+    session=session_from_request(request,db); permissions={key:PermissionService(db).has(user,key,bot.id) for key in ("bot.start","bot.stop","bot.restart","console.view","backups.view","files.view","config.view","database.view","scheduler.view","errors.view")}; incident_count=db.scalar(select(func.count(Incident.id)).where(Incident.bot_id==bot.id,Incident.status==IncidentStatus.OPEN)) if permissions["errors.view"] else None; latest_incident=db.scalar(select(Incident).where(Incident.bot_id==bot.id).order_by(Incident.started_at.desc())) if permissions["errors.view"] else None; return request.app.state.templates.TemplateResponse(request,"bot.html",{"user":user,"bot":bot,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token,"permissions":permissions,"incident_count":incident_count,"latest_incident":latest_incident})
 @router.get("/bots/{bot_id}/console",response_class=HTMLResponse)
 def console_page(request:Request,bot:Bot=Depends(requires_bot_permission("console.view")),user:User=Depends(current_user),db:Session=Depends(get_db)):
     session=session_from_request(request,db); return request.app.state.templates.TemplateResponse(request,"console.html",{"user":user,"bot":bot,"is_owner":user.platform_role is PlatformRole.OWNER,"csrf_token":session.csrf_token})
