@@ -63,3 +63,55 @@ def test_platform_and_path_exclusion(db,tmp_path,monkeypatch):
         def get_database_sources(self): return (DatabaseSource('events','Events','../outside.db'),)
     monkeypatch.setattr('app.services.sqlite_data.get_adapter',lambda _:Unsafe())
     with pytest.raises(SQLiteNotFound): service.source(bot,'events')
+
+from app.adapters.base import BotHealth, BotState, DatabaseEditPolicy
+
+class OfflineAdapter(Adapter):
+    def get_database_sources(self):
+        source=super().get_database_sources()[0]
+        return (DatabaseSource(source.id,source.label,source.path,source.editable,source.tables,edit_policy=DatabaseEditPolicy.EDIT_REQUIRES_BOT_STOP),)
+try: register_adapter('stage6-offline-test',OfflineAdapter())
+except ValueError: pass
+
+class FakeManager:
+    def __init__(self,ready=True,stop_fails=False,start_fails=False):
+        self.running=True; self.ready=ready; self.stop_fails=stop_fails; self.start_fails=start_fails; self.instance='INST-OLD'; self.actions=[]
+    async def get_status(self,bot_id,enabled=True):
+        state=BotState.ONLINE if self.running and self.ready else BotState.STARTING if self.running else BotState.OFFLINE
+        return BotHealth(state=state,process_running=self.running,discord_connected=self.running and self.ready,discord_ready=self.running and self.ready,heartbeat_fresh=self.running and self.ready,instance_id=self.instance)
+    async def stop_bot(self,bot):
+        self.actions.append('stop')
+        if self.stop_fails: return await self.get_status(bot.id)
+        self.running=False; return await self.get_status(bot.id)
+    async def start_bot(self,bot):
+        self.actions.append('start')
+        if self.start_fails: raise RuntimeError('start rejected')
+        self.running=True; self.instance='INST-NEW'; return await self.get_status(bot.id)
+
+def test_offline_edit_uses_supervisor_backup_new_instance_and_ready(db,tmp_path):
+    service,user,bot,root=setup(db,tmp_path); bot.adapter='stage6-offline-test'; db.commit()
+    manager=FakeManager(); service.manager=manager
+    opened=service.row(bot,'events','users',{'id':1})
+    import asyncio
+    result=asyncio.run(service.mutate_process_aware(bot,'events','users',user,'update',{'points':151},{'id':1},opened['concurrency_token']))
+    assert manager.actions==['stop','start']
+    assert result['database_change']=='success' and result['integrity']=='valid'
+    assert result['bot_restart']=='success' and result['discord_ready']=='success'
+    assert result['new_instance_id']=='INST-NEW'
+    assert db.scalar(select(Backup)).verification_status.value=='verified'
+    types=set(db.scalars(select(ActivityEvent.event_type)))
+    assert {'DATABASE_EDIT_STARTED','DATABASE_EDIT_APPLIED','DATABASE_EDIT_VALIDATED','DATABASE_EDIT_READY_CONFIRMED'} <= types
+
+def test_offline_stop_failure_never_writes(db,tmp_path):
+    service,user,bot,root=setup(db,tmp_path); bot.adapter='stage6-offline-test'; db.commit(); service.manager=FakeManager(stop_fails=True)
+    opened=service.row(bot,'events','users',{'id':1})
+    with pytest.raises(Exception) as caught:
+        import asyncio
+        asyncio.run(service.mutate_process_aware(bot,'events','users',user,'update',{'points':999},{'id':1},opened['concurrency_token']))
+    assert sqlite3.connect(root/'events.db').execute('SELECT points FROM users WHERE id=1').fetchone()[0]==120
+    assert caught.value.workflow_result['database_change']=='failed'
+    assert service.manager.actions==['stop']
+
+def test_database_service_has_no_direct_lifecycle_calls():
+    source=Path('app/services/sqlite_data.py').read_text()
+    assert 'subprocess' not in source and 'os.kill' not in source

@@ -10,7 +10,7 @@ import secrets
 import tarfile
 import tempfile
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterator
@@ -234,6 +234,35 @@ class BackupService:
                 os.chmod(target,member.mode & 0o777)
         for item in manifest["files"]:
             if _sha256(destination/item["path"])!=item["sha256"]: raise BackupError("Staging checksum mismatch")
+
+    def recover_pre_edit(self,bot:Bot,backup:Backup,actor:User,operation,*,lock_already_held:bool=False)->bool:
+        """Restore a verified PRE_EDIT snapshot for automatic edit recovery.
+
+        Unlike a user restore this intentionally creates no PRE_RESTORE snapshot: the
+        immutable PRE_EDIT archive is the recovery point and the caller still owns
+        the bot data lock.  The root swap and manifest validation are identical to
+        the normal Stage 4 restore boundary.
+        """
+        if backup.bot_id!=bot.id or backup.backup_type is not BackupType.PRE_EDIT or not self.verify(backup):
+            raise BackupNotRestorable("A verified PRE_EDIT backup is required for recovery")
+        lock=nullcontext() if lock_already_held else bot_data_locks.acquire(bot.id)
+        with lock:
+            source=self.source_root(bot); parent=source.parent
+            staging=Path(tempfile.mkdtemp(prefix=f".edit-recovery-{bot.id}-",dir=parent)); staging.rmdir()
+            rollback=parent/f".edit-failed-{bot.id}-{operation.public_id}"
+            swapped=False
+            try:
+                self._extract(backup,staging); os.replace(source,rollback); swapped=True; os.replace(staging,source)
+                for item in self.manifest(backup)["files"]:
+                    target=source/item["path"]
+                    if not target.is_file() or _sha256(target)!=item["sha256"]: raise BackupError("Recovered database validation failed")
+                shutil.rmtree(rollback); backup.restore_count+=1; self.db.commit(); return True
+            except Exception:
+                if swapped:
+                    failed=parent/f".invalid-edit-{bot.id}-{operation.public_id}"
+                    if source.exists(): os.replace(source,failed)
+                    os.replace(rollback,source); shutil.rmtree(failed,ignore_errors=True)
+                shutil.rmtree(staging,ignore_errors=True); raise
     def restore(self,bot:Bot,backup:Backup,actor:User,operation=None,safety:Backup|None=None)->tuple[Backup,bool]:
         if backup.bot_id!=bot.id: raise BackupNotRestorable("Resource not found")
         if backup.verification_status is not VerificationStatus.VERIFIED or not self.verify(backup): raise BackupNotRestorable("Backup is not verified and cannot be restored")
