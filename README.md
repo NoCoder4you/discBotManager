@@ -316,3 +316,35 @@ Sensitive values are returned only as a `configured` marker. Existing secrets ar
 ### Security restrictions
 
 The central policy blocks `.env`, keys/certificates, credentials, tokens/secrets, virtual environments, caches, Git data, logs, backup storage, supervisor state, the platform database, binary/non-UTF-8 data, and symlink traversal. Stage 5 provides **no arbitrary filesystem access, source-code editing, `.env` viewing, supervisor-state access, platform-database access, SQL, scheduler, shell, eval, deployment, or terminal capability**. View/edit byte limits and JSON nesting limits are configurable with `FILE_VIEW_MAX_BYTES`, `FILE_EDIT_MAX_BYTES`, and `JSON_MAX_DEPTH`.
+
+## Stage 6: Safe SQLite database architecture
+
+Stage 6 adds a deliberately constrained database path:
+
+**Registered SQLite Source → Stage 5 Safe Resolver → `SQLiteDataService` → parameterised structured query builder → typed validation → verified `PRE_EDIT` backup → SQLite transaction.**
+
+Adapters register `DatabaseSource`, `DatabaseTable`, and `DatabaseColumn` metadata. A source ID is resolved only inside an already-authorised bot; its relative path must remain under that bot's single data root and may not traverse, be absolute, use a symlink, or identify the configured platform database. The service never scans the host for databases. A source without table metadata is optionally available for generic **read-only** table/schema inspection; mutation is possible only when the source, table, and individual column are all explicitly editable.
+
+### Database permissions and non-enumeration
+
+`database.view` permits bot-assigned users to list registered sources and inspect visible tables, schemas, and bounded rows. `database.edit` permits only the predefined safe mutation workflow; it does not override source/table/column read-only policy. Existing assignment, account-enabled, explicit-deny, and owner rules are evaluated by the canonical `PermissionService` on every request. Database IDs are resolved within the authorised bot route, and missing, hidden, cross-bot, unsafe, and unregistered resources all return the same unavailable response.
+
+### Read-only and sensitive safety
+
+Table registration controls visible, hidden, editable, insertable, and deletable states. Column registration controls typed editing, choices, ranges, nullability, custom validators, and hidden/sensitive status. Primary keys and BLOBs are read-only by default. Sensitive columns are excluded from grids, details, search, filtering, concurrency tokens, diffs, events, and audits. BLOB reads expose only type and size, large text is truncated, `NULL` remains distinct, and Discord snowflakes remain strings end to end.
+
+### Browsing, filtering, and sorting
+
+Browsing uses server-side pages of exactly 25, 50, or 100 rows and never returns an unbounded table. Sorting identifiers must match the server-derived visible-column allowlist. Search covers at most five visible text columns unless the adapter provides a narrower list. Filters are structured column/operator/value objects and support equals, not-equals, contains, starts-with, greater/less-than, before/after, and null predicates. Values are always SQLite bound parameters; identifiers are selected from registered or introspected allowlists and safely quoted. There is no JOIN builder or user-controlled SQL/SQL function facility. Counts are exact in the current release and may be relatively expensive on exceptionally large unindexed tables.
+
+### Editing, backups, concurrency, and integrity
+
+Typed Pydantic request envelopes carry record keys, field-value maps, and concurrency tokens. The service revalidates SQLite affinity, required/null constraints, configured choices/ranges, custom validators, and edit policy. Before every insert, update, or delete it acquires the shared Stage 4/5 per-bot data lock, runs `PRAGMA quick_check`, and creates and verifies a protected Stage 4 `PRE_EDIT` backup. Stage 4 detects SQLite files and uses Python's SQLite online backup API, producing a transaction-consistent snapshot that works with WAL databases rather than copying live `.db`, `-wal`, and `-shm` files blindly. Backup failure blocks the live mutation.
+
+Each write uses a short `BEGIN IMMEDIATE` transaction with `PRAGMA foreign_keys=ON` and a two-second busy timeout. Constraint failures roll back and database contention returns a safe retry message. A deterministic SHA-256 concurrency token covers the current non-sensitive row state; a stale token is rejected before backup/write, preventing lost updates without disclosing secrets. A `quick_check` runs inside the transaction and again after mutation. Successful mutations reuse operations, append-only audits, and structured `DATABASE_ROW_CREATED`, `DATABASE_ROW_UPDATED`, `DATABASE_ROW_DELETED`, and `BOT_DATABASE_CHANGED` events. Audit changes contain only explicitly changed, non-sensitive values.
+
+Inserts require source edit, table edit, and `allow_insert`; generated integer primary keys remain SQLite-generated. Deletes require source edit, table edit, `allow_delete`, `database.edit`, CSRF, a current concurrency token, and the exact typed confirmation `DELETE <table>`. Foreign-key constraints are never disabled. Databases registered with `live_edit_supported=False` remain browsable but are mutation-blocked in this release; supervisor-controlled stop/edit/restart orchestration is intentionally deferred rather than performing unsafe direct process calls.
+
+### Database security boundaries
+
+Stage 6 provides **no raw SQL console, no arbitrary SQL, no platform database access, no schema modification, no arbitrary database paths, no `ATTACH DATABASE`, no PRAGMA editor, no extension loading, no database download/upload/replacement, and no host-wide database browser**. Application database filenames and the configured SQLite application database path are hard-blocked even if an adapter attempts to register them. Recovery continues to use the Stage 4 restore workflow.

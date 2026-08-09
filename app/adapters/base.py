@@ -21,6 +21,19 @@ class DataSource:
     id:str; name:str; path:str; description:str=""; type:str="json"; editable:bool=False
     validator:Callable[[Any],Any]|type|None=None; sensitive_fields:tuple[str,...]=()
     danger:Danger=Danger.LOW; config_fields:tuple[ConfigField,...]=()
+@dataclass(frozen=True)
+class DatabaseColumn:
+    key:str; label:str=""; type:str|None=None; editable:bool=False; hidden:bool=False
+    sensitive:bool=False; nullable:bool|None=None; choices:tuple[str,...]=(); minimum:float|None=None
+    maximum:float|None=None; validator:Callable[[Any],Any]|None=None
+@dataclass(frozen=True)
+class DatabaseTable:
+    name:str; label:str=""; visible:bool=True; editable:bool=False; allow_insert:bool=False
+    allow_delete:bool=False; columns:tuple[DatabaseColumn,...]=(); search_columns:tuple[str,...]=()
+@dataclass(frozen=True)
+class DatabaseSource:
+    id:str; label:str; path:str; editable:bool=False; tables:tuple[DatabaseTable,...]=()
+    live_edit_supported:bool=True
 class BaseBotAdapter(ABC):
     supports_heartbeat: bool=False
     supports_discord_status: bool=False
@@ -31,5 +44,6 @@ class BaseBotAdapter(ABC):
     def get_cogs(self)->tuple: return ()
     def get_data_sources(self)->tuple: return ()
     def get_config_schema(self)->tuple[DataSource,...]: return ()
+    def get_database_sources(self)->tuple[DatabaseSource,...]: return ()
     def get_quick_actions(self)->tuple[QuickAction,...]: return ()
     def get_custom_permissions(self)->tuple[str,...]: return ()
