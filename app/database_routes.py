@@ -10,13 +10,15 @@ from app.models import Bot, User
 from app.schemas import DatabaseCreate, DatabaseDelete, DatabaseFilter, DatabaseUpdate
 from app.services.permissions import PermissionService
 from app.services.sqlite_data import SQLiteBusy, SQLiteConflict, SQLiteDataError, SQLiteDataService, SQLiteIntegrityError, SQLiteNotFound, SQLiteValidationError
+from app.adapters.base import DatabaseEditPolicy
 
 router=APIRouter()
 def failure(exc):
+    detail=getattr(exc,"workflow_result",None) or str(exc)
     if isinstance(exc,SQLiteNotFound): return HTTPException(404,"Resource not found")
-    if isinstance(exc,(SQLiteConflict,SQLiteBusy)): return HTTPException(409,str(exc))
-    if isinstance(exc,(SQLiteValidationError,SQLiteIntegrityError)): return HTTPException(422,str(exc))
-    return HTTPException(400,str(exc))
+    if isinstance(exc,(SQLiteConflict,SQLiteBusy)): return HTTPException(409,detail)
+    if isinstance(exc,(SQLiteValidationError,SQLiteIntegrityError)): return HTTPException(422,detail)
+    return HTTPException(400,detail)
 def csrf(request,db,token):
     row=session_from_request(request,db)
     if not row: raise HTTPException(401,"Authentication required")
@@ -37,9 +39,9 @@ def database_page(database_id:str,request:Request,bot:Bot=Depends(requires_bot_p
 @router.get("/bots/{bot_id}/databases/{database_id}/{table_name}",response_class=HTMLResponse)
 def table_page(database_id:str,table_name:str,request:Request,bot:Bot=Depends(requires_bot_permission("database.view")),user:User=Depends(current_user),db:Session=Depends(get_db)):
     service=SQLiteDataService(db)
-    try: schema=service.schema(bot,database_id,table_name); policy=next(x for x in service.tables(bot,database_id) if x["name"]==table_name)
+    try: source,_=service.source(bot,database_id); schema=service.schema(bot,database_id,table_name); policy=next(x for x in service.tables(bot,database_id) if x["name"]==table_name)
     except SQLiteDataError as exc: raise failure(exc)
-    return request.app.state.templates.TemplateResponse(request,"database_table.html",context(request,db,user,bot,database_id=database_id,table_name=table_name,schema=schema,policy=policy,can_edit=PermissionService(db).has(user,"database.edit",bot.id)))
+    return request.app.state.templates.TemplateResponse(request,"database_table.html",context(request,db,user,bot,database_id=database_id,table_name=table_name,schema=schema,policy=policy,offline_edit=source.mutation_policy is DatabaseEditPolicy.EDIT_REQUIRES_BOT_STOP,can_edit=PermissionService(db).has(user,"database.edit",bot.id)))
 @router.get("/api/bots/{bot_id}/databases")
 def database_list(bot:Bot=Depends(requires_bot_permission("database.view")),db:Session=Depends(get_db)): return {"databases":SQLiteDataService(db).overview(bot)}
 @router.get("/api/bots/{bot_id}/databases/{database_id}/tables")
@@ -63,17 +65,17 @@ def row(database_id:str,table_name:str,key:str=Query(...,max_length=2000),bot:Bo
     except (ValueError,TypeError,json.JSONDecodeError): raise HTTPException(422,"Invalid record key")
     except SQLiteDataError as exc: raise failure(exc)
 @router.post("/api/bots/{bot_id}/databases/{database_id}/tables/{table_name}/rows")
-def create_row(database_id:str,table_name:str,payload:DatabaseCreate,request:Request,x_csrf_token:str=Header(...),bot:Bot=Depends(requires_bot_permission("database.edit")),user:User=Depends(current_user),db:Session=Depends(get_db)):
+async def create_row(database_id:str,table_name:str,payload:DatabaseCreate,request:Request,x_csrf_token:str=Header(...),bot:Bot=Depends(requires_bot_permission("database.edit")),user:User=Depends(current_user),db:Session=Depends(get_db)):
     csrf(request,db,x_csrf_token)
-    try: return SQLiteDataService(db).mutate(bot,database_id,table_name,user,"create",values=payload.values)
+    try: return await SQLiteDataService(db).mutate_process_aware(bot,database_id,table_name,user,"create",values=payload.values)
     except SQLiteDataError as exc: raise failure(exc)
 @router.patch("/api/bots/{bot_id}/databases/{database_id}/tables/{table_name}/row")
-def update_row(database_id:str,table_name:str,payload:DatabaseUpdate,request:Request,x_csrf_token:str=Header(...),bot:Bot=Depends(requires_bot_permission("database.edit")),user:User=Depends(current_user),db:Session=Depends(get_db)):
+async def update_row(database_id:str,table_name:str,payload:DatabaseUpdate,request:Request,x_csrf_token:str=Header(...),bot:Bot=Depends(requires_bot_permission("database.edit")),user:User=Depends(current_user),db:Session=Depends(get_db)):
     csrf(request,db,x_csrf_token)
-    try: return SQLiteDataService(db).mutate(bot,database_id,table_name,user,"update",payload.values,payload.key,payload.concurrency_token)
+    try: return await SQLiteDataService(db).mutate_process_aware(bot,database_id,table_name,user,"update",payload.values,payload.key,payload.concurrency_token)
     except SQLiteDataError as exc: raise failure(exc)
 @router.delete("/api/bots/{bot_id}/databases/{database_id}/tables/{table_name}/row")
-def delete_row(database_id:str,table_name:str,payload:DatabaseDelete,request:Request,x_csrf_token:str=Header(...),bot:Bot=Depends(requires_bot_permission("database.edit")),user:User=Depends(current_user),db:Session=Depends(get_db)):
+async def delete_row(database_id:str,table_name:str,payload:DatabaseDelete,request:Request,x_csrf_token:str=Header(...),bot:Bot=Depends(requires_bot_permission("database.edit")),user:User=Depends(current_user),db:Session=Depends(get_db)):
     csrf(request,db,x_csrf_token)
-    try: return SQLiteDataService(db).mutate(bot,database_id,table_name,user,"delete",key=payload.key,token=payload.concurrency_token,confirmation=payload.confirmation)
+    try: return await SQLiteDataService(db).mutate_process_aware(bot,database_id,table_name,user,"delete",key=payload.key,token=payload.concurrency_token,confirmation=payload.confirmation)
     except SQLiteDataError as exc: raise failure(exc)

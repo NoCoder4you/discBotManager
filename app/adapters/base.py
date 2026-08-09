@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, Callable
 class BotState(str,Enum): ONLINE="online"; RUNNING="running"; STARTING="starting"; RESTARTING="restarting"; DISCONNECTED="disconnected"; CRASHED="crashed"; CRASH_LOOP="crash_loop"; MAINTENANCE="maintenance"; DISABLED="disabled"; OFFLINE="offline"; STOPPING="stopping"; UNKNOWN="unknown"
+class DatabaseEditPolicy(str,Enum): LIVE_EDIT_SUPPORTED="live_edit_supported"; EDIT_REQUIRES_BOT_STOP="edit_requires_bot_stop"
 @dataclass(frozen=True)
 class BotHealth:
     state:BotState=BotState.UNKNOWN; process_running:bool=False; discord_connected:bool=False; discord_ready:bool=False; detail:str|None=None
@@ -34,6 +35,11 @@ class DatabaseTable:
 class DatabaseSource:
     id:str; label:str; path:str; editable:bool=False; tables:tuple[DatabaseTable,...]=()
     live_edit_supported:bool=True
+    edit_policy:DatabaseEditPolicy|None=None
+    validator:Callable[[str],Any]|None=None
+    @property
+    def mutation_policy(self)->DatabaseEditPolicy:
+        return self.edit_policy or (DatabaseEditPolicy.LIVE_EDIT_SUPPORTED if self.live_edit_supported else DatabaseEditPolicy.EDIT_REQUIRES_BOT_STOP)
 class BaseBotAdapter(ABC):
     supports_heartbeat: bool=False
     supports_discord_status: bool=False

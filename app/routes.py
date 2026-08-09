@@ -14,7 +14,7 @@ from app.core.security import require_csrf
 from app.core.events import AuditService, DomainEvent, EventBus, EventType
 from app.core.operations import create_operation
 from app.models import OperationStatus, utcnow
-from app.services.process_manager import ProcessConflict, ProcessLaunchError, SupervisorUnavailable, process_manager
+from app.services.process_manager import ProcessConflict, ProcessLaunchError, SupervisorUnavailable, process_manager, process_workflow_locks
 from app.services.console import SlowSubscriber
 from app.services.console_stream import console_subscriptions
 from app.database import SessionLocal
@@ -95,11 +95,14 @@ async def process_action(request:Request,action:str,csrf_token:str=Form(...),use
     bot_id=request.path_params["bot_id"]; bot=PermissionService(db).visible_bot(user,bot_id)
     if not bot or not PermissionService(db).has(user,f"bot.{action}",bot_id): raise HTTPException(404,"Resource not found")
     session=session_from_request(request,db); require_csrf(request,session,csrf_token)
+    try: workflow_lock=process_workflow_locks.acquire(bot.id); workflow_lock.__enter__()
+    except ProcessConflict as exc: raise HTTPException(409,str(exc)) from exc
     previous=await process_manager.get_status(bot.id,bot.enabled); op=create_operation(db,"activity",user_id=user.id,bot_id=bot.id,event_metadata={"action":action,"before":previous.state.value}); op.status=OperationStatus.RUNNING
     requested=DomainEvent({"start":EventType.BOT_START_REQUESTED,"stop":EventType.BOT_STOP_REQUESTED,"restart":EventType.BOT_RESTART_REQUESTED}[action],user,bot.id,{"before":previous.state.value}); EventBus(db).publish(requested); AuditService(db).record(requested,"requested",bot.id,op.public_id); db.commit()
     try:
         health=await getattr(process_manager,f"{action}_bot")(bot)
     except (ProcessConflict,ProcessLaunchError) as exc:
         op.status=OperationStatus.FAILED; op.completed_at=utcnow(); op.error=str(exc); event=DomainEvent(EventType.BOT_PROCESS_FAILED,user,bot.id,{"action":action,"before":previous.state.value,"error":str(exc)}); EventBus(db).publish(event); AuditService(db).record(event,"failed",bot.id,op.public_id); db.commit(); raise HTTPException(409,str(exc)) from exc
+    finally: workflow_lock.__exit__(None,None,None)
     event_type={"start":EventType.BOT_STARTED,"stop":EventType.BOT_STOPPED,"restart":EventType.BOT_RESTARTED}[action]; payload={"before":previous.state.value,"after":health.state.value}; event=DomainEvent(event_type,user,bot.id,payload); EventBus(db).publish(event); AuditService(db).record(event,"success",bot.id,op.public_id); op.status=OperationStatus.COMPLETED; op.completed_at=utcnow(); op.event_metadata={"action":action,**payload}; db.commit()
     return JSONResponse({"operation_id":op.public_id,"state":health.state.value,"detail":health.detail})

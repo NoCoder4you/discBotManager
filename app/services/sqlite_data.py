@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import sqlite3
 from contextlib import closing
@@ -9,13 +10,14 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.adapters.base import DatabaseColumn, DatabaseSource, DatabaseTable
+from app.adapters.base import BotState, DatabaseColumn, DatabaseEditPolicy, DatabaseSource, DatabaseTable
 from app.adapters.registry import get_adapter
 from app.core.config import Settings, get_settings
 from app.core.events import AuditService, DomainEvent, EventBus, EventType
 from app.core.operations import create_operation
 from app.models import BackupType, Bot, OperationStatus, User, VerificationStatus, utcnow
 from app.services.backups import BackupService, bot_data_locks
+from app.services.process_manager import BotProcessManager, ProcessConflict, process_manager, process_workflow_locks
 from app.services.data import BotDataService
 
 PLATFORM_NAMES={"platform.db","platform.sqlite","platform.sqlite3","dashboard.db","permissions.db","sessions.db","audit.db"}
@@ -30,8 +32,8 @@ class SQLiteIntegrityError(SQLiteDataError): pass
 
 class SQLiteDataService:
     """Structured, bot-scoped SQLite inspection and mutation; never accepts SQL."""
-    def __init__(self,db:Session,settings:Settings|None=None):
-        self.db=db; self.settings=settings or get_settings(); self.data=BotDataService(db,self.settings); self.backups=BackupService(db,self.settings)
+    def __init__(self,db:Session,settings:Settings|None=None,manager:BotProcessManager|None=None):
+        self.db=db; self.settings=settings or get_settings(); self.data=BotDataService(db,self.settings); self.backups=BackupService(db,self.settings); self.manager=manager or process_manager
     def sources(self,bot:Bot)->tuple[DatabaseSource,...]: return tuple(get_adapter(bot.adapter).get_database_sources())
     def source(self,bot:Bot,source_id:str)->tuple[DatabaseSource,Path]:
         source=next((s for s in self.sources(bot) if s.id==source_id),None)
@@ -181,7 +183,7 @@ class SQLiteDataService:
         return result
     def mutate(self,bot,source_id,table_name,actor,action,values=None,key=None,token=None,confirmation=None):
         source,path=self.source(bot,source_id); table=self._table(source,path,table_name); schema=self._schema(path,table)
-        if not source.editable or not table.editable or not source.live_edit_supported: raise SQLiteNotFound("Resource not found")
+        if not source.editable or not table.editable or source.mutation_policy is not DatabaseEditPolicy.LIVE_EDIT_SUPPORTED: raise SQLiteNotFound("Resource not found")
         if action=="create" and not table.allow_insert: raise SQLiteNotFound("Resource not found")
         if action=="delete" and (not table.allow_delete or confirmation!=f"DELETE {table.name}"): raise SQLiteValidationError("Deletion confirmation did not match.")
         clean={} if action=="delete" else self._validate_values(table,schema,values or {},action=="create")
@@ -196,8 +198,8 @@ class SQLiteDataService:
             if backup.verification_status is not VerificationStatus.VERIFIED: raise SQLiteDataError("Unable to change the database because the safety backup could not be verified.")
             operation=create_operation(self.db,"activity",user_id=actor.id,bot_id=bot.id,event_metadata={"action":f"database.{action}","database":source.id,"table":table.name}); operation.status=OperationStatus.RUNNING
             try:
-                identifier,newrow=self._transaction(path,table,schema,action,clean,key or {})
-                if self.health(path)["integrity"]!="healthy": raise SQLiteIntegrityError("Post-write integrity validation failed.")
+                identifier,newrow=self._transaction(path,table,schema,action,clean,key or {},token)
+                self._post_write_validate(source,path)
                 changes={k:{"before":current.get(k) if current else None,"after":newrow.get(k) if newrow else None} for k in clean if not next(c for c in schema if c["name"]==k)["sensitive"]}
                 et={"create":EventType.DATABASE_ROW_CREATED,"update":EventType.DATABASE_ROW_UPDATED,"delete":EventType.DATABASE_ROW_DELETED}[action]
                 payload={"database_id":source.id,"table":table.name,"record":identifier,"operation_id":operation.public_id,"changes":changes}
@@ -206,11 +208,16 @@ class SQLiteDataService:
                 return {"operation_id":operation.public_id,"backup_id":backup.public_id,"record":identifier,"concurrency_token":self._token(newrow,schema) if newrow else None}
             except Exception as exc:
                 operation.status=OperationStatus.FAILED; operation.completed_at=utcnow(); operation.error=str(exc)[:255]; self.db.commit(); raise
-    def _transaction(self,path,table,schema,action,values,key):
+    def _transaction(self,path,table,schema,action,values,key,token=None):
         pk=[c["name"] for c in schema if c["primary_key"]]
         con=self._connect(path,False)
         try:
             con.execute("BEGIN IMMEDIATE")
+            if action!="create":
+                where=" AND ".join(f"{self._quote(k)}=?" for k in pk); args=tuple(key[k] for k in pk)
+                locked=con.execute(f"SELECT * FROM {self._quote(table.name)} WHERE {where} LIMIT 1",args).fetchone()
+                if not locked: raise SQLiteConflict("This record is no longer available.")
+                if token is not None and self._token(dict(locked),schema)!=token: raise SQLiteConflict("This record changed before the write began.")
             if action=="create":
                 names=list(values); sql=f"INSERT INTO {self._quote(table.name)} ({','.join(self._quote(x) for x in names)}) VALUES ({','.join('?' for _ in names)})"; cur=con.execute(sql,tuple(values[x] for x in names)); identifier=str(cur.lastrowid); lookup={pk[0]:cur.lastrowid} if len(pk)==1 else {}
             else:
@@ -229,6 +236,115 @@ class SQLiteDataService:
         except sqlite3.OperationalError as exc: con.rollback(); self._sqlite_error(exc)
         except Exception: con.rollback(); raise
         finally: con.close()
+
+    def _post_write_validate(self,source:DatabaseSource,path:Path)->None:
+        if self.health(path)["integrity"]!="healthy": raise SQLiteIntegrityError("Post-write integrity validation failed.")
+        if source.validator:
+            try: result=source.validator(str(path))
+            except Exception as exc: raise SQLiteIntegrityError("Database domain validation failed.") from exc
+            if result is False: raise SQLiteIntegrityError("Database domain validation failed.")
+
+    def _workflow_event(self,event_type,actor,bot,operation,result="success",**payload):
+        event=DomainEvent(event_type,actor,bot.id,{"operation_id":operation.public_id,**payload})
+        EventBus(self.db).publish(event); AuditService(self.db).record(event,result,bot.id,operation.public_id)
+
+    def _stage(self,operation,stage,**facts):
+        metadata=dict(operation.event_metadata or {}); metadata.update({"stage":stage,**facts}); operation.event_metadata=metadata
+        self.db.commit()
+
+    async def _wait_for(self,bot,predicate,timeout):
+        deadline=asyncio.get_running_loop().time()+timeout; latest=None
+        while asyncio.get_running_loop().time()<deadline:
+            latest=await self.manager.get_status(bot.id,bot.enabled)
+            if predicate(latest): return latest
+            await asyncio.sleep(min(.1,timeout/10))
+        return latest or await self.manager.get_status(bot.id,bot.enabled)
+
+    async def mutate_process_aware(self,bot,source_id,table_name,actor,action,values=None,key=None,token=None,confirmation=None):
+        """Run the durable, supervisor-mediated offline edit workflow."""
+        source,path=self.source(bot,source_id); table=self._table(source,path,table_name); schema=self._schema(path,table)
+        if source.mutation_policy is DatabaseEditPolicy.LIVE_EDIT_SUPPORTED:
+            result=self.mutate(bot,source_id,table_name,actor,action,values,key,token,confirmation)
+            return {**result,"database_change":"success","integrity":"valid","bot_restart":"not_required","discord_ready":"not_required"}
+        if not source.editable or not table.editable: raise SQLiteNotFound("Resource not found")
+        if action=="create" and not table.allow_insert: raise SQLiteNotFound("Resource not found")
+        if action=="delete" and (not table.allow_delete or confirmation!=f"DELETE {table.name}"): raise SQLiteValidationError("Deletion confirmation did not match.")
+        clean={} if action=="delete" else self._validate_values(table,schema,values or {},action=="create")
+        if action!="create":
+            current=self._current(path,table,schema,key or {})
+            if self._token(current,schema)!=token: raise SQLiteConflict("This record changed since you opened it.")
+        else: current=None
+        operation=create_operation(self.db,"activity",user_id=actor.id,bot_id=bot.id,event_metadata={"action":f"database.{action}","database":source.id,"table":table.name,"stage":"authorised"})
+        operation.status=OperationStatus.RUNNING; self._workflow_event(EventType.DATABASE_EDIT_STARTED,actor,bot,operation,result="requested",database=source.id,table=table.name); self.db.commit()
+        backup=None; stopped=False; initially_running=False; old_instance=None; committed=False
+        result={"operation_id":operation.public_id,"database_change":"not_started","integrity":"not_checked","rollback":"not_required","bot_restart":"not_required","discord_ready":"not_required"}
+        try:
+            with process_workflow_locks.acquire(bot.id), bot_data_locks.acquire(bot.id):
+                self._stage(operation,"backup")
+                try: backup=self.backups.create(bot,actor,BackupType.PRE_EDIT,f"Before {action} in {source.id}.{table.name}",protected=True)
+                except Exception as exc: raise SQLiteDataError("The database change was not applied because the required safety backup could not be verified.") from exc
+                if backup.verification_status is not VerificationStatus.VERIFIED or not self.backups.verify(backup):
+                    raise SQLiteDataError("The database change was not applied because the required safety backup could not be verified.")
+                result["backup_id"]=backup.public_id; self._stage(operation,"stopping",backup_id=backup.public_id)
+                before=await self.manager.get_status(bot.id,bot.enabled); initially_running=before.process_running; old_instance=before.instance_id
+                if initially_running:
+                    await self.manager.stop_bot(bot)
+                    offline=await self._wait_for(bot,lambda h:not h.process_running and h.state is BotState.OFFLINE,self.settings.supervisor_stop_timeout)
+                    if offline.process_running or offline.state is not BotState.OFFLINE: raise SQLiteDataError(f"Bot stop could not be confirmed; current state is {offline.state.value}.")
+                    stopped=True
+                self._stage(operation,"transaction",old_instance_id=old_instance)
+                # Re-resolve the registration/path/schema after the process is offline.
+                source,path=self.source(bot,source_id); table=self._table(source,path,table_name); schema=self._schema(path,table)
+                identifier,newrow=self._transaction(path,table,schema,action,clean,key or {},token); committed=True; result["database_change"]="success"; result["record"]=identifier
+                self._workflow_event(EventType.DATABASE_EDIT_APPLIED,actor,bot,operation,database=source.id,table=table.name,record=identifier,backup_id=backup.public_id)
+                self._stage(operation,"validation")
+                try: self._post_write_validate(source,path); result["integrity"]="valid"; self._workflow_event(EventType.DATABASE_EDIT_VALIDATED,actor,bot,operation,backup_id=backup.public_id)
+                except Exception:
+                    result["database_change"]="failed"; result["integrity"]="invalid"; self._workflow_event(EventType.DATABASE_VALIDATION_FAILED,actor,bot,operation,"failed",backup_id=backup.public_id)
+                    self._workflow_event(EventType.DATABASE_EDIT_RECOVERY_STARTED,actor,bot,operation,result="requested",backup_id=backup.public_id)
+                    try:
+                        self.backups.recover_pre_edit(bot,backup,actor,operation,lock_already_held=True); source,path=self.source(bot,source_id); self._post_write_validate(source,path)
+                        result["rollback"]="success"; result["integrity"]="restored_valid"; self._workflow_event(EventType.DATABASE_EDIT_ROLLED_BACK,actor,bot,operation,backup_id=backup.public_id)
+                    except Exception as recovery:
+                        result["rollback"]="failed"; self._workflow_event(EventType.DATABASE_EDIT_RECOVERY_FAILED,actor,bot,operation,"failed",backup_id=backup.public_id)
+                        raise SQLiteIntegrityError("The database change failed and automatic recovery could not be validated. The bot was not restarted.") from recovery
+                if result["database_change"]=="success":
+                    row_event={"create":EventType.DATABASE_ROW_CREATED,"update":EventType.DATABASE_ROW_UPDATED,"delete":EventType.DATABASE_ROW_DELETED}[action]
+                    payload={"database_id":source.id,"table":table.name,"record":identifier,"operation_id":operation.public_id,"backup_id":backup.public_id,"old_instance_id":old_instance}
+                    event=DomainEvent(row_event,actor,bot.id,payload); EventBus(self.db).publish(event); AuditService(self.db).record(event,"success",f"{source.id}.{table.name}:{identifier}",operation.public_id)
+                    EventBus(self.db).publish(DomainEvent(EventType.BOT_DATABASE_CHANGED,actor,bot.id,payload))
+                if initially_running:
+                    self._stage(operation,"restart")
+                    try: started_health=await self.manager.start_bot(bot)
+                    except Exception as exc:
+                        result["bot_restart"]="failed"; self._workflow_event(EventType.DATABASE_EDIT_RESTART_FAILED,actor,bot,operation,"failed",database_change=result["database_change"]); raise SQLiteDataError("Database processing completed, but the bot could not be restarted.") from exc
+                    new_instance=started_health.instance_id; healthy=await self._wait_for(bot,lambda h:h.process_running and h.instance_id==new_instance,min(self.settings.bot_heartbeat_timeout_seconds,self.settings.bot_ready_timeout_seconds))
+                    if not healthy.process_running:
+                        result["bot_restart"]="startup_crash"; self._workflow_event(EventType.BOT_PROCESS_FAILED,actor,bot,operation,"failed",stage="startup",instance_id=new_instance); raise SQLiteDataError("Database processing completed, but the bot process exited during startup.")
+                    result["bot_restart"]="success"; result["new_instance_id"]=new_instance; self._workflow_event(EventType.DATABASE_EDIT_BOT_RESTARTED,actor,bot,operation,old_instance_id=old_instance,new_instance_id=new_instance)
+                    self._stage(operation,"ready_check")
+                    ready=await self._wait_for(bot,lambda h:h.process_running and h.instance_id==new_instance and h.discord_connected and h.discord_ready and h.heartbeat_fresh,self.settings.bot_ready_timeout_seconds)
+                    if ready.process_running and ready.instance_id==new_instance and ready.discord_connected and ready.discord_ready and ready.heartbeat_fresh:
+                        result["discord_ready"]="success"; self._workflow_event(EventType.DATABASE_EDIT_READY_CONFIRMED,actor,bot,operation,instance_id=new_instance)
+                    else:
+                        result["discord_ready"]="timeout" if ready.process_running else "startup_crash"; et=EventType.DATABASE_EDIT_READY_TIMEOUT if ready.process_running else EventType.BOT_PROCESS_FAILED
+                        self._workflow_event(et,actor,bot,operation,"failed",instance_id=new_instance,process_state=ready.state.value,timeout=self.settings.bot_ready_timeout_seconds)
+                operation.status=OperationStatus.COMPLETED if result["database_change"]=="success" else OperationStatus.FAILED; operation.completed_at=utcnow(); operation.event_metadata={**operation.event_metadata,**result,"stage":"complete"}; backup.protected=False; self.db.commit(); return result
+        except Exception as exc:
+            # A pre-commit failure leaves SQLite unchanged, but an online bot that
+            # was stopped must still be recovered through the supervisor.
+            if stopped and not committed:
+                try:
+                    restarted=await self.manager.start_bot(bot); result["bot_restart"]="success" if restarted.process_running else "failed"
+                    if restarted.process_running:
+                        ready=await self._wait_for(bot,lambda h:h.process_running and h.instance_id==restarted.instance_id and h.discord_connected and h.discord_ready and h.heartbeat_fresh,self.settings.bot_ready_timeout_seconds)
+                        result["discord_ready"]="success" if ready.discord_ready and ready.heartbeat_fresh else "timeout"
+                except Exception: result["bot_restart"]="failed"
+            result["database_change"]="success" if committed and result["database_change"]=="success" else "failed"
+            operation.status=OperationStatus.FAILED; operation.completed_at=utcnow(); operation.error=str(exc)[:255]; operation.event_metadata={**operation.event_metadata,**result,"stage":"failed"}
+            self._workflow_event(EventType.DATABASE_EDIT_FAILED,actor,bot,operation,"failed",stage=operation.event_metadata.get("stage"),database_change=result["database_change"],bot_restart=result["bot_restart"],discord_ready=result["discord_ready"]); self.db.commit()
+            exc.workflow_result=result
+            raise
     @staticmethod
     def _sqlite_error(exc):
         if "locked" in str(exc).lower() or "busy" in str(exc).lower(): raise SQLiteBusy("Database is temporarily busy. Please try again.") from exc

@@ -343,8 +343,50 @@ Typed Pydantic request envelopes carry record keys, field-value maps, and concur
 
 Each write uses a short `BEGIN IMMEDIATE` transaction with `PRAGMA foreign_keys=ON` and a two-second busy timeout. Constraint failures roll back and database contention returns a safe retry message. A deterministic SHA-256 concurrency token covers the current non-sensitive row state; a stale token is rejected before backup/write, preventing lost updates without disclosing secrets. A `quick_check` runs inside the transaction and again after mutation. Successful mutations reuse operations, append-only audits, and structured `DATABASE_ROW_CREATED`, `DATABASE_ROW_UPDATED`, `DATABASE_ROW_DELETED`, and `BOT_DATABASE_CHANGED` events. Audit changes contain only explicitly changed, non-sensitive values.
 
-Inserts require source edit, table edit, and `allow_insert`; generated integer primary keys remain SQLite-generated. Deletes require source edit, table edit, `allow_delete`, `database.edit`, CSRF, a current concurrency token, and the exact typed confirmation `DELETE <table>`. Foreign-key constraints are never disabled. Databases registered with `live_edit_supported=False` remain browsable but are mutation-blocked in this release; supervisor-controlled stop/edit/restart orchestration is intentionally deferred rather than performing unsafe direct process calls.
+Inserts require source edit, table edit, and `allow_insert`; generated integer primary keys remain SQLite-generated. Deletes require source edit, table edit, `allow_delete`, `database.edit`, CSRF, a current concurrency token, and the exact typed confirmation `DELETE <table>`. Foreign-key constraints are never disabled. Databases registered with the offline edit policy remain browsable and use the supervisor-controlled process-aware workflow described below; the database service never performs direct process lifecycle calls.
 
 ### Database security boundaries
 
 Stage 6 provides **no raw SQL console, no arbitrary SQL, no platform database access, no schema modification, no arbitrary database paths, no `ATTACH DATABASE`, no PRAGMA editor, no extension loading, no database download/upload/replacement, and no host-wide database browser**. Application database filenames and the configured SQLite application database path are hard-blocked even if an adapter attempts to register them. Recovery continues to use the Stage 4 restore workflow.
+
+## Process-Aware Database Editing (Stage 6)
+
+A registered `DatabaseSource` explicitly selects `LIVE_EDIT_SUPPORTED` or
+`EDIT_REQUIRES_BOT_STOP`; policy is registration metadata and is never inferred
+from a filename. Live editing retains the structured, parameterised Stage 6
+transaction without unnecessary lifecycle actions. Both policies require
+`database.edit`, optimistic concurrency, a Stage 4 `PRE_EDIT` snapshot made with
+SQLite's online backup API, archive/checksum/integrity verification, a short
+transaction, SQLite `quick_check`, an optional registered domain validator, and
+safe audit/events.
+
+### Offline Mutation Workflow
+
+Offline sources run as one correlated database operation: **Backup → Stop →
+Transaction → Integrity Validation → Restart → Ready**. The per-bot data lock is
+held across backup, mutation, validation, and recovery, while the process
+workflow lock rejects colliding manual start/stop/restart actions. Stop and start
+are requested only through `BotProcessManager` and the supervisor. A write starts
+only after the current instance is confirmed `OFFLINE`; startup success requires
+both a surviving new instance and a fresh current-instance heartbeat reporting
+Discord connected and Ready.
+
+### Failure Recovery
+
+Backup creation or verification failure leaves the bot running and data
+untouched. Stop failure blocks the transaction. A pre-commit error rolls back the
+short SQLite transaction and restarts a bot that the workflow stopped. A
+post-commit integrity or domain failure invokes Stage 4 automatic recovery from
+the protected `PRE_EDIT` archive, validates the restored tree/database, and only
+then restarts. If recovery cannot be validated, the bot stays stopped. Restart
+failure and startup crash are reported independently from a committed database
+change. A Ready timeout does not roll valid data back: the response records a
+successful database change and process restart with `discord_ready=timeout`.
+
+### Permission Semantics
+
+`database.edit` authorises this predefined safety workflow, including its
+internal supervisor stop/start steps, but does **not** grant the actor standalone
+`bot.stop`, `bot.start`, or `bot.restart` permissions. Authorization and bot
+visibility remain server-side requirements before the durable critical workflow
+begins; recovery does not depend on the browser connection remaining open.

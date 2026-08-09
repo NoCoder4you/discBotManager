@@ -1,5 +1,7 @@
 from __future__ import annotations
 from typing import Protocol
+import threading
+from contextlib import contextmanager
 import httpx
 from app.adapters.base import BotHealth, BotState
 from app.core.config import get_settings
@@ -7,6 +9,18 @@ from app.core.config import get_settings
 class ProcessConflict(RuntimeError): pass
 class ProcessLaunchError(RuntimeError): pass
 class SupervisorUnavailable(RuntimeError): pass
+
+class ProcessWorkflowLocks:
+    """Coordinates multi-step application workflows with manual process actions."""
+    def __init__(self): self._guard=threading.Lock(); self._locks={}
+    @contextmanager
+    def acquire(self,bot_id):
+        with self._guard: lock=self._locks.setdefault(bot_id,threading.Lock())
+        if not lock.acquire(False): raise ProcessConflict("Another process operation is already running for this bot")
+        try: yield
+        finally: lock.release()
+
+process_workflow_locks=ProcessWorkflowLocks()
 
 class SupervisorBackend(Protocol):
     async def status(self,bot_id:str)->dict: ...
