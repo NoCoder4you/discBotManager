@@ -2,6 +2,7 @@ from abc import ABC
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, Callable
+from app.scheduler.types import RegisteredTask
 class BotState(str,Enum): ONLINE="online"; RUNNING="running"; STARTING="starting"; RESTARTING="restarting"; DISCONNECTED="disconnected"; CRASHED="crashed"; CRASH_LOOP="crash_loop"; MAINTENANCE="maintenance"; DISABLED="disabled"; OFFLINE="offline"; STOPPING="stopping"; UNKNOWN="unknown"
 class DatabaseEditPolicy(str,Enum): LIVE_EDIT_SUPPORTED="live_edit_supported"; EDIT_REQUIRES_BOT_STOP="edit_requires_bot_stop"
 @dataclass(frozen=True)
@@ -52,4 +53,5 @@ class BaseBotAdapter(ABC):
     def get_config_schema(self)->tuple[DataSource,...]: return ()
     def get_database_sources(self)->tuple[DatabaseSource,...]: return ()
     def get_quick_actions(self)->tuple[QuickAction,...]: return ()
+    def get_tasks(self)->tuple[RegisteredTask,...]: return ()
     def get_custom_permissions(self)->tuple[str,...]: return ()

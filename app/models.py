@@ -96,3 +96,14 @@ class BotInstance(Base):
     last_disconnect_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
     discord_latency_ms: Mapped[float|None]=mapped_column()
     guild_count: Mapped[int|None]=mapped_column(Integer)
+class TaskSchedule(Base):
+    __tablename__="task_schedules"; __table_args__=(UniqueConstraint("bot_id","task_id"),)
+    id:Mapped[int]=mapped_column(primary_key=True); bot_id:Mapped[str]=mapped_column(ForeignKey("bots.id"),index=True); task_id:Mapped[str]=mapped_column(String(64),index=True)
+    enabled:Mapped[bool]=mapped_column(Boolean,default=False); schedule_type:Mapped[str]=mapped_column(String(20)); structured_config:Mapped[dict]=mapped_column(JSON); timezone:Mapped[str]=mapped_column(String(64),default="UTC")
+    next_run_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_run_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_status:Mapped[str|None]=mapped_column(String(20)); reconciliation_required:Mapped[bool]=mapped_column(Boolean,default=False)
+    created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow,onupdate=utcnow)
+class TaskRun(Base):
+    __tablename__="task_runs"
+    id:Mapped[int]=mapped_column(primary_key=True); public_id:Mapped[str]=mapped_column(String(40),unique=True,index=True); bot_id:Mapped[str]=mapped_column(ForeignKey("bots.id"),index=True); task_id:Mapped[str]=mapped_column(String(64),index=True)
+    trigger:Mapped[str]=mapped_column(String(20)); status:Mapped[str]=mapped_column(String(20),index=True); triggered_by_id:Mapped[int|None]=mapped_column(ForeignKey("users.id")); actor_display:Mapped[str]=mapped_column(String(100),default="SYSTEM"); operation_id:Mapped[str|None]=mapped_column(String(30))
+    queued_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow); started_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); finished_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); duration_ms:Mapped[int|None]=mapped_column(Integer); summary:Mapped[str|None]=mapped_column(String(500)); result_metadata:Mapped[dict]=mapped_column(JSON,default=dict)

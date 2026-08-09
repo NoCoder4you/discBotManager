@@ -390,3 +390,103 @@ internal supervisor stop/start steps, but does **not** grant the actor standalon
 `bot.stop`, `bot.start`, or `bot.restart` permissions. Authorization and bot
 visibility remain server-side requirements before the durable critical workflow
 begins; recovery does not depend on the browser connection remaining open.
+# Stage 7 — Registered Scheduler and Task Management
+
+## Task registration
+
+The scheduler executes **only trusted code-registered tasks**. A bot adapter exposes
+`RegisteredTask` objects from `BaseBotAdapter.get_tasks()`, and `TaskRegistry`
+resolves them by the registered bot adapter and a strict lowercase task ID. Task
+definitions contain the handler plus safe capabilities: manual-run and schedule
+editing controls, danger level, timeout, supported schedule types, process/Discord
+requirements, concurrency policy, and misfire policy. There is one persisted
+schedule per bot/task in this initial implementation. Removing a definition never
+causes dynamic import: its old configuration becomes an orphaned, non-executable
+record for reconciliation diagnostics.
+
+## Scheduler permissions and scope
+
+The canonical bot-scoped permissions are:
+
+* `scheduler.view` — task metadata, schedules, status, and paginated safe history.
+* `scheduler.run` — manually queue a task that permits manual execution.
+* `scheduler.edit` — configure, enable, or disable a task schedule when the task
+  permits that change.
+
+Every web request rechecks the enabled user, enabled bot assignment, explicit
+deny/role resolution, and required permission. Hidden bot, task, history, and run
+resources use the existing non-enumerating `404 Resource not found` model.
+
+## Structured schedules and time
+
+Supported validated schedule types are interval (minimum **5 minutes**, maximum
+365 days), daily, weekly, monthly, and one-time. Monthly days are deliberately
+limited to 1–28 so the rule has an occurrence in every month; ambiguous shorter-
+month behavior is not invented. One-time instants must be future, timezone-aware
+values and are disabled after success. All stored run instants are UTC; recurring
+rules retain an explicit IANA timezone and APScheduler's timezone-aware triggers
+apply that zone at DST boundaries. APScheduler follows the timezone database for
+missing/ambiguous local wall times and coalesces to at most one recovery execution.
+
+**No raw cron input is accepted.** Typed Pydantic discriminated schemas accept
+only known structured fields, then trusted server code converts them to internal
+APScheduler triggers. The browser never supplies cron text, handler names, module
+paths, or scheduler internals.
+
+## Execution, durability, and reconciliation
+
+APScheduler lives in the independently deployed Stage 3 supervisor, not FastAPI.
+FastAPI authenticates and authorizes mutations, creates/correlates operations, and
+sends only bot/task IDs plus validated schedule data across the authenticated
+supervisor boundary. The supervisor resolves the trusted handler again, persists
+run state, and executes in a detached worker, so closing a browser or restarting
+FastAPI does not cancel work. It never falls back to execution inside FastAPI when
+the supervisor is unavailable.
+
+On supervisor startup and explicit reconciliation, persisted definitions are
+compared with current adapter tasks and deterministic APScheduler job IDs. Active
+jobs are replaced rather than duplicated, disabled/stale jobs are removed, and
+next-run timestamps are recalculated without executing discovered jobs. Orphaned
+or invalid configurations are marked reconciliation-required and never run.
+Disabled bot registrations do not receive automatic task jobs by default.
+
+The default misfire policy is conservative `SKIP`; trusted tasks may opt into one
+coalesced `RUN_ONCE` recovery. A supervisor restart cannot preserve an in-process
+Python coroutine; runs left running can be diagnosed as interrupted during
+reconciliation, and are never silently reported successful. Disabling a schedule
+prevents future automatic starts but does not kill a run already in progress.
+Manual execution does not change the schedule or its next-run calculation.
+
+## Concurrency, failure handling, and history
+
+The default `FORBID_OVERLAP` lock is scoped to `bot_id + task_id`, so a second
+manual/scheduled attempt cannot duplicate a running task while unrelated tasks
+remain independent. Trusted definitions can opt into overlap explicitly. Required
+process and authoritative Stage 3 Discord Ready state are checked before execution;
+failed requirements produce a safe `SKIPPED` result rather than an exception.
+
+Every run has a UUID-backed `RUN-…` ID and records trigger (`MANUAL`, `SCHEDULED`,
+or `RECOVERY`), actor (`SYSTEM` for automatic work), operation correlation, queued/
+started/finished times, duration, status, a 500-character safe summary, and at most
+8 KiB of JSON metadata. History APIs are paginated (maximum page size 100) and
+retention is bounded to the newest 500 runs per bot/task. Task exceptions are
+isolated and redacted to a generic failure; timeouts become `TIMED_OUT`; neither
+condition changes bot health or crashes the supervisor. There are no automatic
+retries in Stage 7.
+
+Meaningful run and schedule changes publish transaction-scoped activity events and
+append audit entries with bot/task/run/operation correlation. Scheduler ticks and
+countdowns are not audited.
+
+## Scheduler security boundaries
+
+The scheduler provides:
+
+* **No arbitrary shell commands** and no `shell=True` execution.
+* **No arbitrary Python**, `eval`, `exec`, user-selected imports, or script runner.
+* **No arbitrary SQL** or user-defined database mutations.
+* **No user-defined executable jobs** or executable browser-supplied fields.
+* CSRF protection for Run Now, enable/disable, and schedule updates.
+
+Trusted tasks that mutate files or databases remain responsible for using the
+existing backup, data, database, and process-aware lock services from Stages 4–6.
