@@ -5,7 +5,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from app.core.config import get_settings
 from app.database import SessionLocal
 from app.supervisor.service import BotNotRegistered, IdentityMismatch, SupervisorConflict, SupervisorService
-from app.schemas import AgentHeartbeat
+from app.schemas import AgentHeartbeat, DiscordSnapshotEnvelope
+from app.services.guild_snapshots import GuildSnapshotService, SnapshotRejected
 from app.services.heartbeat import HeartbeatRejected, HeartbeatService
 from app.services.console import ConsoleBroker, ConsoleCapture, SecretRedactor
 from app.services.telemetry import TelemetryCollector
@@ -21,6 +22,8 @@ service=SupervisorService(SessionLocal,settings.supervisor_stop_timeout,console_
 scheduler_service=SchedulerService(SessionLocal,service)
 telemetry_collector=TelemetryCollector(SessionLocal,SupervisorService._identity_valid,settings.telemetry_interval_seconds,settings.telemetry_history_minutes,settings.telemetry_stale_after_seconds)
 heartbeat_service=HeartbeatService(SessionLocal,settings.bot_heartbeat_clock_skew_seconds,settings.bot_heartbeat_min_interval_seconds,settings.bot_heartbeat_timeout_seconds)
+snapshot_refresh_requests={}
+snapshot_refresh_last={}
 @asynccontextmanager
 async def lifespan(_):
     telemetry_collector.start(); scheduler_service.start()
@@ -39,11 +42,29 @@ def call(method,*args):
 @app.post("/internal/agent/heartbeat")
 async def heartbeat(request:Request,payload:AgentHeartbeat,x_bot_management_secret:str|None=Header(None)):
     if request.headers.get("content-length") and int(request.headers["content-length"])>4096: raise HTTPException(413,"Heartbeat payload too large")
-    try: return heartbeat_service.accept(payload,x_bot_management_secret)
+    try:
+        result=heartbeat_service.accept(payload,x_bot_management_secret)
+        if snapshot_refresh_requests.pop(payload.bot_id,None): result["guild_snapshot_requested"]=True
+        return result
     except HeartbeatRejected as exc: raise HTTPException(exc.status_code,str(exc)) from exc
+@app.post("/internal/agent/guild-snapshot")
+async def guild_snapshot(request:Request,payload:DiscordSnapshotEnvelope,x_bot_management_secret:str|None=Header(None)):
+    if request.headers.get("content-length") and int(request.headers["content-length"])>settings.discord_snapshot_max_bytes: raise HTTPException(413,"Snapshot payload too large")
+    if any(len(g.channels)>settings.discord_snapshot_max_channels or len(g.roles)>settings.discord_snapshot_max_roles for g in payload.guilds): raise HTTPException(413,"Snapshot record limit exceeded")
+    with SessionLocal() as db:
+        try: return GuildSnapshotService(db,settings).accept(payload,x_bot_management_secret)
+        except SnapshotRejected as exc: raise HTTPException(exc.status_code,str(exc)) from exc
 
 @app.get("/internal/health",dependencies=[Depends(authenticated)])
 def health(): return service.health()
+@app.post("/internal/bots/{bot_id}/guild-snapshot/refresh",dependencies=[Depends(authenticated)])
+def request_guild_snapshot(bot_id:str):
+    current=call("registered_instance",bot_id)
+    if not current["enabled"] or not current["process_expected"]: raise HTTPException(409,"Bot process is unavailable")
+    import time
+    last=snapshot_refresh_last.get(bot_id)
+    if last and time.monotonic()-last<settings.discord_snapshot_manual_cooldown_seconds: raise HTTPException(429,"Snapshot refresh rate limit exceeded")
+    snapshot_refresh_last[bot_id]=time.monotonic(); snapshot_refresh_requests[bot_id]=True; return {"accepted":True,"status":"REQUESTED"}
 @app.get("/internal/scheduler/health",dependencies=[Depends(authenticated)])
 def scheduler_health(): return scheduler_service.health()
 @app.post("/internal/scheduler/reconcile",dependencies=[Depends(authenticated)])

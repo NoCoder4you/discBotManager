@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     file_view_max_bytes: int = Field(default=1048576, ge=1024, le=10485760)
     file_edit_max_bytes: int = Field(default=524288, ge=1024, le=5242880)
     json_max_depth: int = Field(default=64, ge=4, le=256)
+    discord_snapshot_stale_seconds: int = Field(default=300,ge=30,le=86400)
+    discord_snapshot_refresh_seconds: int = Field(default=300,ge=30,le=86400)
+    discord_snapshot_manual_cooldown_seconds: int = Field(default=20,ge=5,le=300)
+    discord_snapshot_max_channels: int = Field(default=1000,ge=1,le=10000)
+    discord_snapshot_max_roles: int = Field(default=500,ge=1,le=5000)
+    discord_snapshot_max_bytes: int = Field(default=2097152,ge=65536,le=16777216)
     @property
     def secure_cookies(self) -> bool: return self.environment == "production"
     @model_validator(mode="after")

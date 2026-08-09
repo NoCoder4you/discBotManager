@@ -59,6 +59,29 @@ class AgentHeartbeat(BaseModel):
         if self.ready and not self.connected: raise ValueError("ready requires connected")
         if self.ready_shards is not None and self.shard_count is not None and self.ready_shards>self.shard_count: raise ValueError("ready_shards exceeds shard_count")
         return self
+SNOWFLAKE=r"^[0-9]{1,32}$"
+class DiscordRoleSnapshot(BaseModel):
+    role_id:str=Field(pattern=SNOWFLAKE); name:str=Field(min_length=1,max_length=100); position:int=Field(ge=0,le=100000)
+    colour:int=Field(default=0,ge=0,le=0xFFFFFF); managed:bool=False; permissions:list[str]=Field(default_factory=list,max_length=200); bot_has_role:bool=False
+    @field_validator("permissions")
+    @classmethod
+    def permission_names(cls,v):
+        if any(not re.fullmatch(r"[a-z][a-z0-9_]{0,63}",x) for x in v): raise ValueError("invalid permission name")
+        return list(dict.fromkeys(v))
+class DiscordChannelSnapshot(BaseModel):
+    channel_id:str=Field(pattern=SNOWFLAKE); name:str=Field(min_length=1,max_length=100); type:Literal["text","voice","category","forum","announcement","stage","thread","public_thread","private_thread","news_thread"]
+    category_id:str|None=Field(default=None,pattern=SNOWFLAKE); parent_id:str|None=Field(default=None,pattern=SNOWFLAKE); position:int=Field(default=0,ge=0,le=100000); permissions:list[str]=Field(default_factory=list,max_length=200)
+    _permission_names=field_validator("permissions")(DiscordRoleSnapshot.permission_names.__func__)
+class DiscordGuildData(BaseModel):
+    guild_id:str=Field(pattern=SNOWFLAKE); name:str=Field(min_length=1,max_length=100); icon_url:str|None=Field(default=None,max_length=500)
+    member_count:int|None=Field(default=None,ge=0,le=10000000); owner_id:str|None=Field(default=None,pattern=SNOWFLAKE)
+    bot_member_id:str=Field(pattern=SNOWFLAKE); bot_nickname:str|None=Field(default=None,max_length=100); bot_role_ids:list[str]=Field(default_factory=list,max_length=500)
+    guild_permissions:list[str]=Field(default_factory=list,max_length=200); roles:list[DiscordRoleSnapshot]=Field(default_factory=list); channels:list[DiscordChannelSnapshot]=Field(default_factory=list)
+    truncated:bool=False
+    _guild_permission_names=field_validator("guild_permissions")(DiscordRoleSnapshot.permission_names.__func__)
+class DiscordSnapshotEnvelope(BaseModel):
+    bot_id:str=Field(min_length=2,max_length=36,pattern=r"^[a-z0-9][a-z0-9_-]{1,35}$"); instance_id:str=Field(min_length=6,max_length=41,pattern=r"^INST-[0-9a-fA-F-]{1,36}$")
+    snapshot_generated_at:datetime; guilds:list[DiscordGuildData]=Field(max_length=1000)
 class BotMutation(BaseModel):
     id: str = Field(min_length=2, max_length=36)
     display_name: str = Field(min_length=1, max_length=100)
