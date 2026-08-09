@@ -31,6 +31,19 @@ class JsonSave(BaseModel):
 class ConfigSave(BaseModel):
     values: dict[str,object]
     base_version: str = Field(min_length=64,max_length=64,pattern=r"^[0-9a-f]{64}$")
+class DatabaseFilter(BaseModel):
+    column: str = Field(min_length=1,max_length=128)
+    operator: Literal["equals","not_equals","contains","starts_with","greater_than","less_than","before","after","is_null","is_not_null"]
+    value: object|None = None
+class DatabaseUpdate(BaseModel):
+    key: dict[str,object]
+    values: dict[str,object]
+    concurrency_token: str = Field(min_length=64,max_length=64,pattern=r"^[0-9a-f]{64}$")
+class DatabaseCreate(BaseModel): values: dict[str,object]
+class DatabaseDelete(BaseModel):
+    key: dict[str,object]
+    concurrency_token: str = Field(min_length=64,max_length=64,pattern=r"^[0-9a-f]{64}$")
+    confirmation: str = Field(min_length=1,max_length=200)
 class AgentHeartbeat(BaseModel):
     bot_id: str = Field(min_length=2,max_length=36,pattern=r"^[a-z0-9][a-z0-9_-]{1,35}$")
     instance_id: str = Field(min_length=6,max_length=41,pattern=r"^INST-[0-9a-fA-F-]{1,36}$")
