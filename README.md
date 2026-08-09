@@ -292,3 +292,27 @@ Unknown, unassigned, disabled, explicitly denied, wrong-bot, and guessed backup 
 ### Known limitations
 
 Filesystem work runs away from FastAPI's async event loop, but the operation worker is currently in-process rather than a durable external queue. Atomic directory exchange protects the replacement boundary and incomplete backup directories are never valid; automatic scheduling and restart-resumption of in-progress operations are deferred. One configured data root per bot is supported. Full text/JSON diff presentation, file editing, SQLite browsing, deployment history, and backup downloads are outside Stage 4.
+
+## Stage 5 data management architecture
+
+Stage 5 implements a deliberately bot-scoped data path: **Bot Data Root → Safe Path Resolver → Adapter Data Source Registry → JSON/Pydantic or custom validation → verified PRE_EDIT backup → atomic write → version history**. It is not a host file manager. Each bot must have exactly one relative `data_roots` entry beneath its registered folder; requests contain only relative paths, and resolution rejects absolute Unix/Windows paths, traversal, backslashes, symlinks, and targets outside that root.
+
+### File and configuration permissions
+
+`files.view` permits browsing safe metadata and viewing allowlisted UTF-8 `.json`, `.txt`, `.md`, `.yaml`, `.yml`, `.toml`, and `.ini` files. `files.edit` permits mutation only of JSON sources explicitly registered by the bot adapter as editable; generic text and Python source editing are not available. `config.view` and `config.edit` independently govern adapter-registered typed configuration. Every request rechecks the enabled user, enabled assignment, bot visibility, and current bot permission, with explicit denial precedence and identical not-found responses for hidden resources.
+
+### JSON editing, history, and concurrency
+
+JSON is parsed server-side, depth/size limited, and passed through an optional Pydantic model or custom source validator before any backup or write. The browser keeps JSON as text, so string Discord snowflakes and object keys are never passed through JavaScript numeric conversion. A save must present the SHA-256 hash issued when the file was opened. A stale hash returns a conflict without changing the live file.
+
+Under the shared Stage 4 per-bot data lock, the service creates and verifies a protected `PRE_EDIT` backup; failure blocks the edit. It writes a same-directory temporary file, flushes and fsyncs it, preserves mode and ownership where permitted, validates the temporary content, atomically installs it with `os.replace`, fsyncs the directory, and verifies final bytes. Successful history rows reference the Stage 4 backup rather than duplicating file content and link actor, time, operation, and before/after hashes. History diffs read the protected backup artifact and redact registered sensitive top-level JSON fields. Historical whole-backup restoration remains exclusively in Stage 4 and requires `backups.restore`; Stage 5 does not add a lower-privilege restore shortcut.
+
+### Typed configuration and secrets
+
+Adapters expose `DataSource` and `ConfigField` definitions rather than central hard-coded bot settings. Supported fields are boolean switches, strings, constrained integers/floats, fixed choices, colours, Discord channel/role/user IDs (validated and retained as strings), and durations. Fields can be required, read-only, sensitive, range constrained, and marked as requiring restart. Configuration is validated again server-side and uses the same backup, lock, hash, atomic-write, operation, audit, and event pipeline. A restart-required result is displayed but never triggers an implicit restart.
+
+Sensitive values are returned only as a `configured` marker. Existing secrets are never placed in JSON API responses or HTML/page source; an omitted secret remains unchanged and a supplied replacement is write-only. Mutation audit/event payloads contain source identity and hashes, never file contents or secret values.
+
+### Security restrictions
+
+The central policy blocks `.env`, keys/certificates, credentials, tokens/secrets, virtual environments, caches, Git data, logs, backup storage, supervisor state, the platform database, binary/non-UTF-8 data, and symlink traversal. Stage 5 provides **no arbitrary filesystem access, source-code editing, `.env` viewing, supervisor-state access, platform-database access, SQL, scheduler, shell, eval, deployment, or terminal capability**. View/edit byte limits and JSON nesting limits are configurable with `FILE_VIEW_MAX_BYTES`, `FILE_EDIT_MAX_BYTES`, and `JSON_MAX_DEPTH`.

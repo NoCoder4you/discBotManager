@@ -1,7 +1,7 @@
 from abc import ABC
 from dataclasses import dataclass
 from enum import Enum
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 class BotState(str,Enum): ONLINE="online"; RUNNING="running"; STARTING="starting"; RESTARTING="restarting"; DISCONNECTED="disconnected"; CRASHED="crashed"; CRASH_LOOP="crash_loop"; MAINTENANCE="maintenance"; DISABLED="disabled"; OFFLINE="offline"; STOPPING="stopping"; UNKNOWN="unknown"
 @dataclass(frozen=True)
 class BotHealth:
@@ -11,6 +11,16 @@ class BotHealth:
 class Danger(str,Enum): LOW="low"; MEDIUM="medium"; HIGH="high"; CRITICAL="critical"
 @dataclass(frozen=True)
 class QuickAction: key:str; name:str; description:str; required_permission:str; danger:Danger; confirmation_required:bool; handler:Callable[...,Awaitable[None]]
+@dataclass(frozen=True)
+class ConfigField:
+    key:str; label:str; type:str="string"; description:str=""; default:Any=None; required:bool=False
+    editable:bool=True; sensitive:bool=False; choices:tuple[str,...]=(); minimum:float|None=None
+    maximum:float|None=None; step:float|None=None; requires_restart:bool=False
+@dataclass(frozen=True)
+class DataSource:
+    id:str; name:str; path:str; description:str=""; type:str="json"; editable:bool=False
+    validator:Callable[[Any],Any]|type|None=None; sensitive_fields:tuple[str,...]=()
+    danger:Danger=Danger.LOW; config_fields:tuple[ConfigField,...]=()
 class BaseBotAdapter(ABC):
     supports_heartbeat: bool=False
     supports_discord_status: bool=False
@@ -20,5 +30,6 @@ class BaseBotAdapter(ABC):
     def get_commands(self)->tuple: return ()
     def get_cogs(self)->tuple: return ()
     def get_data_sources(self)->tuple: return ()
+    def get_config_schema(self)->tuple[DataSource,...]: return ()
     def get_quick_actions(self)->tuple[QuickAction,...]: return ()
     def get_custom_permissions(self)->tuple[str,...]: return ()
