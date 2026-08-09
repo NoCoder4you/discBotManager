@@ -9,6 +9,8 @@ from app.schemas import AgentHeartbeat
 from app.services.heartbeat import HeartbeatRejected, HeartbeatService
 from app.services.console import ConsoleBroker, ConsoleCapture, SecretRedactor
 from app.services.telemetry import TelemetryCollector
+from app.scheduler.service import SchedulerService, SchedulerUnavailable, TaskConflict, TaskUnavailable
+from app.scheduler.schemas import ScheduleToggle, ScheduleUpdate, SupervisorTaskRun
 
 settings=get_settings()
 known=[settings.app_secret,settings.supervisor_secret,settings.discord_client_secret,settings.database_url]
@@ -16,13 +18,14 @@ known.extend(value for key,value in os.environ.items() if any(word in key.upper(
 console_broker=ConsoleBroker(settings.console_buffer_lines)
 console_capture=ConsoleCapture(console_broker,SecretRedactor(known),settings.console_log_root,settings.console_max_line_length,settings.console_log_max_bytes,settings.console_log_backup_count)
 service=SupervisorService(SessionLocal,settings.supervisor_stop_timeout,console_capture)
+scheduler_service=SchedulerService(SessionLocal,service)
 telemetry_collector=TelemetryCollector(SessionLocal,SupervisorService._identity_valid,settings.telemetry_interval_seconds,settings.telemetry_history_minutes,settings.telemetry_stale_after_seconds)
 heartbeat_service=HeartbeatService(SessionLocal,settings.bot_heartbeat_clock_skew_seconds,settings.bot_heartbeat_min_interval_seconds,settings.bot_heartbeat_timeout_seconds)
 @asynccontextmanager
 async def lifespan(_):
-    telemetry_collector.start()
+    telemetry_collector.start(); scheduler_service.start()
     try: yield
-    finally: telemetry_collector.stop()
+    finally: telemetry_collector.stop(); scheduler_service.stop()
 app=FastAPI(title="Bot Process Supervisor",docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
 
 def authenticated(x_supervisor_secret: str | None=Header(None)):
@@ -41,6 +44,25 @@ async def heartbeat(request:Request,payload:AgentHeartbeat,x_bot_management_secr
 
 @app.get("/internal/health",dependencies=[Depends(authenticated)])
 def health(): return service.health()
+@app.get("/internal/scheduler/health",dependencies=[Depends(authenticated)])
+def scheduler_health(): return scheduler_service.health()
+@app.post("/internal/scheduler/reconcile",dependencies=[Depends(authenticated)])
+def scheduler_reconcile(): return scheduler_service.reconcile()
+@app.put("/internal/scheduler/bots/{bot_id}/tasks/{task_id}",dependencies=[Depends(authenticated)])
+def schedule_configure(bot_id:str,task_id:str,payload:ScheduleUpdate):
+    try: return scheduler_service.configure(bot_id,task_id,payload.model_dump(mode="json"))
+    except TaskUnavailable as exc: raise HTTPException(404,"Resource unavailable") from exc
+    except (TaskConflict,ValueError,SchedulerUnavailable) as exc: raise HTTPException(409,str(exc)) from exc
+@app.patch("/internal/scheduler/bots/{bot_id}/tasks/{task_id}",dependencies=[Depends(authenticated)])
+def schedule_toggle(bot_id:str,task_id:str,payload:ScheduleToggle):
+    try: return scheduler_service.toggle(bot_id,task_id,payload.enabled)
+    except TaskUnavailable as exc: raise HTTPException(404,"Resource unavailable") from exc
+    except (TaskConflict,SchedulerUnavailable) as exc: raise HTTPException(409,str(exc)) from exc
+@app.post("/internal/scheduler/bots/{bot_id}/tasks/{task_id}/runs",dependencies=[Depends(authenticated)])
+def task_run(bot_id:str,task_id:str,payload:SupervisorTaskRun):
+    try: return scheduler_service.enqueue(bot_id,task_id,payload.trigger,payload.operation_id,payload.user_id,payload.actor)
+    except TaskUnavailable as exc: raise HTTPException(404,"Resource unavailable") from exc
+    except TaskConflict as exc: raise HTTPException(409,str(exc)) from exc
 @app.get("/internal/processes",dependencies=[Depends(authenticated)])
 def processes(): return call("reconcile")
 @app.get("/internal/bots/{bot_id}",dependencies=[Depends(authenticated)])

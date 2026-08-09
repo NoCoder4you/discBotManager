@@ -34,9 +34,9 @@ class SupervisorBackend(Protocol):
 class SupervisorClient:
     def __init__(self,url=None,secret=None,timeout=None):
         settings=get_settings(); self.url=(url or settings.supervisor_url).rstrip("/"); self.secret=secret if secret is not None else settings.supervisor_secret; self.timeout=timeout or settings.supervisor_timeout
-    async def _request(self,method,path):
+    async def _request(self,method,path,json=None):
         try:
-            async with httpx.AsyncClient(base_url=self.url,timeout=self.timeout) as client: response=await client.request(method,path,headers={"X-Supervisor-Secret":self.secret})
+            async with httpx.AsyncClient(base_url=self.url,timeout=self.timeout) as client: response=await client.request(method,path,headers={"X-Supervisor-Secret":self.secret},json=json)
         except httpx.RequestError as exc: raise SupervisorUnavailable("Unable to contact the process supervisor.") from exc
         if response.status_code==409: raise ProcessConflict(response.json().get("detail","Process operation conflict"))
         if response.status_code>=400: raise SupervisorUnavailable("The process supervisor rejected the request.")
@@ -48,6 +48,11 @@ class SupervisorClient:
     async def console(self,bot_id,after=0): return await self._request("GET",f"/internal/bots/{bot_id}/console?after={after}")
     async def telemetry(self,bot_id): return await self._request("GET",f"/internal/bots/{bot_id}/telemetry")
     async def telemetry_history(self,bot_id,minutes): return await self._request("GET",f"/internal/bots/{bot_id}/telemetry/history?minutes={minutes}")
+    async def scheduler_health(self): return await self._request("GET","/internal/scheduler/health")
+    async def scheduler_reconcile(self): return await self._request("POST","/internal/scheduler/reconcile")
+    async def configure_schedule(self,bot_id,task_id,payload): return await self._request("PUT",f"/internal/scheduler/bots/{bot_id}/tasks/{task_id}",payload)
+    async def toggle_schedule(self,bot_id,task_id,enabled): return await self._request("PATCH",f"/internal/scheduler/bots/{bot_id}/tasks/{task_id}",{"enabled":enabled})
+    async def run_task(self,bot_id,task_id,payload): return await self._request("POST",f"/internal/scheduler/bots/{bot_id}/tasks/{task_id}/runs",payload)
 
 class BotProcessManager:
     """Stable application boundary for the independently running supervisor."""
