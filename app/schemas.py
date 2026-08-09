@@ -25,6 +25,12 @@ class CreateBackup(BaseModel):
         return value or None
 class RestoreBackup(BaseModel): confirmation: str = Field(min_length=1,max_length=100)
 class PinBackup(BaseModel): pinned: bool
+class JsonSave(BaseModel):
+    content: str = Field(max_length=5242880)
+    base_version: str = Field(min_length=64,max_length=64,pattern=r"^[0-9a-f]{64}$")
+class ConfigSave(BaseModel):
+    values: dict[str,object]
+    base_version: str = Field(min_length=64,max_length=64,pattern=r"^[0-9a-f]{64}$")
 class AgentHeartbeat(BaseModel):
     bot_id: str = Field(min_length=2,max_length=36,pattern=r"^[a-z0-9][a-z0-9_-]{1,35}$")
     instance_id: str = Field(min_length=6,max_length=41,pattern=r"^INST-[0-9a-fA-F-]{1,36}$")

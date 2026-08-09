@@ -55,6 +55,20 @@ class Backup(Base):
     archive_name: Mapped[str]=mapped_column(String(100),default="data.tar.gz")
     manifest_name: Mapped[str]=mapped_column(String(100),default="manifest.json")
     created_by: Mapped[User|None]=relationship()
+class DataVersion(Base):
+    __tablename__="data_versions"
+    id: Mapped[int]=mapped_column(primary_key=True)
+    bot_id: Mapped[str]=mapped_column(ForeignKey("bots.id"),index=True)
+    data_source: Mapped[str]=mapped_column(String(100),index=True)
+    relative_path: Mapped[str]=mapped_column(String(500))
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow,index=True)
+    actor_id: Mapped[int|None]=mapped_column(ForeignKey("users.id"))
+    operation_id: Mapped[str]=mapped_column(String(30),index=True)
+    backup_id: Mapped[int]=mapped_column(ForeignKey("backups.id"))
+    previous_hash: Mapped[str]=mapped_column(String(64))
+    new_hash: Mapped[str]=mapped_column(String(64))
+    actor: Mapped[User|None]=relationship()
+    backup: Mapped[Backup]=relationship()
 class BotInstance(Base):
     """Durable identity for one generation of a registered bot process."""
     __tablename__="bot_instances"

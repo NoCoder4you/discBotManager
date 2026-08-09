@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     backup_retention_weekly: int = Field(default=8, ge=0, le=10000)
     backup_retention_monthly: int = Field(default=12, ge=0, le=10000)
     backup_retention_manual: int = Field(default=0, ge=0, le=10000)
+    file_view_max_bytes: int = Field(default=1048576, ge=1024, le=10485760)
+    file_edit_max_bytes: int = Field(default=524288, ge=1024, le=5242880)
+    json_max_depth: int = Field(default=64, ge=4, le=256)
     @property
     def secure_cookies(self) -> bool: return self.environment == "production"
     @model_validator(mode="after")
