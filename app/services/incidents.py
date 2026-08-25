@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.events import DomainEvent, EventType
-from app.models import (ActivityEvent, BotInstance, ErrorGroup, Incident, IncidentEvent,
+from app.models import (ActivityEvent, BotInstance, BotMaintenance, ErrorGroup, Incident, IncidentEvent,
                         IncidentSeverity, IncidentStatus, utcnow)
 from app.services.console import SecretRedactor
 
@@ -69,6 +69,9 @@ class IncidentService:
         kind,severity,title,source=rule
         if self.db.scalar(select(IncidentEvent.id).where(IncidentEvent.source_key==event.event_id,IncidentEvent.event_code==event.type.value)): return None
         context={key:self._safe_value(value) for key,value in event.payload.items() if key in SAFE_CONTEXT and value is not None}
+        maintenance=self.db.get(BotMaintenance,event.bot_id) if event.bot_id else None
+        if maintenance and maintenance.enabled:
+            context["maintenance_active"]=True; context["maintenance_reason"]=safe_text(maintenance.reason or "",500)
         exception,signature=error_signature(event.payload)
         correlation=str(event.payload.get("task_id") or event.payload.get("instance_id") or event.payload.get("operation_id") or "")
         fingerprint=hashlib.sha256(f"{event.bot_id}|{kind}|{signature}|{correlation}".encode()).hexdigest()

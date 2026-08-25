@@ -8,10 +8,10 @@ from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import delete, func, select
 from app.core.events import AuditService, DomainEvent, EventBus, EventType
-from app.models import Bot, Operation, OperationStatus, TaskRun, TaskSchedule, utcnow
+from app.models import Bot, BotMaintenance, Operation, OperationStatus, TaskRun, TaskSchedule, utcnow
 from app.scheduler.registry import TaskRegistry
 from app.scheduler.schemas import SCHEDULE_ADAPTER
-from app.scheduler.types import ConcurrencyPolicy, TaskExecutionContext, TaskResult, TaskRunStatus, TaskTrigger
+from app.scheduler.types import ConcurrencyPolicy, MaintenancePolicy, TaskExecutionContext, TaskResult, TaskRunStatus, TaskTrigger
 
 class SchedulerUnavailable(RuntimeError): pass
 class TaskConflict(RuntimeError): pass
@@ -130,7 +130,8 @@ class SchedulerService:
                         self._running.add(key); acquired=True
                     run=TaskRun(public_id=f"RUN-{uuid.uuid4()}",bot_id=bot_id,task_id=task_id,trigger=trigger,status="queued",actor_display="SYSTEM"); db.add(run); db.flush(); run_id=run.public_id
                 else: run=db.scalar(select(TaskRun).where(TaskRun.public_id==run_id))
-                reason=self._precondition(bot,task)
+                maintenance=db.get(BotMaintenance,bot.id)
+                reason=self._precondition(bot,task,maintenance)
                 if reason: return self._finish(db,run,TaskRunStatus.SKIPPED,reason,task)
                 run.status="running"; run.started_at=utcnow(); self._event(db,EventType.TASK_STARTED,bot_id,task_id,run,actor); db.commit()
             context=TaskExecutionContext(bot_id,task_id,run_id,operation_id,TaskTrigger(trigger),user_id)
@@ -145,8 +146,9 @@ class SchedulerService:
         finally:
             if acquired:
                 with self._guard: self._running.discard(key)
-    def _precondition(self,bot,task):
+    def _precondition(self,bot,task,maintenance=None):
         if not bot.enabled and not task.allow_while_bot_disabled: return "Skipped because the bot registration is disabled."
+        if maintenance and maintenance.enabled and task.maintenance_policy is MaintenancePolicy.BLOCK_DURING_MAINTENANCE: return "Skipped because the bot is in Maintenance Mode."
         health=self.process_service.status(bot.id)
         if task.requires_discord_ready and not health.get("discord_ready"): return "Skipped because the bot was not Ready on Discord."
         if task.requires_process_running and not health.get("process_running"): return "Skipped because the bot process was not running."

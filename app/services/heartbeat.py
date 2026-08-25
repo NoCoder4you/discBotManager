@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from app.models import ActivityEvent, Bot, BotInstance, utcnow
+from app.models import ActivityEvent, Bot, BotInstance, BotMaintenance, utcnow
+from app.services.maintenance import MaintenanceService
 from app.schemas import AgentHeartbeat
 
 
@@ -50,6 +51,12 @@ class HeartbeatService:
             row.last_agent_timestamp=sent; row.last_heartbeat_at=now
             row.discord_connected=heartbeat.connected; row.discord_ready=heartbeat.ready
             row.discord_latency_ms=heartbeat.latency_ms; row.guild_count=heartbeat.guild_count
+            if heartbeat.maintenance_applied is not None:
+                maintenance=db.get(BotMaintenance,bot.id)
+                if not maintenance: maintenance=BotMaintenance(bot_id=bot.id,enabled=False,bypass_user_ids=[],bypass_roles=[]); db.add(maintenance)
+                changed=maintenance.applied_enabled is not heartbeat.maintenance_applied or maintenance.applied_instance_id!=row.instance_id
+                maintenance.applied_enabled=heartbeat.maintenance_applied; maintenance.applied_instance_id=row.instance_id; maintenance.applied_at=now; maintenance.sync_error=None
+                if changed and maintenance.applied_enabled is maintenance.enabled: self._event(db,"BOT_MAINTENANCE_SYNCED",row,enabled=maintenance.enabled)
             if heartbeat.connected and not was_connected:
                 row.connected_at=now; self._event(db,"BOT_DISCORD_CONNECTED",row)
             if not heartbeat.connected and was_connected:
@@ -59,7 +66,8 @@ class HeartbeatService:
                 self._event(db,"BOT_READY_RECOVERED" if recovered else "BOT_READY",row)
             if was_stale and received: self._event(db,"BOT_HEARTBEAT_RECOVERED",row)
             db.commit()
-            return {"accepted":True,"received_at":now.isoformat()}
+            maintenance=db.get(BotMaintenance,bot.id)
+            return {"accepted":True,"received_at":now.isoformat(),"maintenance":{"enabled":bool(maintenance and maintenance.enabled),"reason":maintenance.reason if maintenance else None,"public_message":maintenance.public_message if maintenance else None,"bypass_user_ids":maintenance.bypass_user_ids if maintenance else [],"bypass_roles":maintenance.bypass_roles if maintenance else []}}
 
     def invalidate(self, row: BotInstance):
         row.discord_connected=False; row.discord_ready=False; row.discord_latency_ms=None; row.guild_count=None

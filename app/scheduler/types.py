@@ -8,6 +8,7 @@ class ConcurrencyPolicy(str,Enum): FORBID_OVERLAP="forbid_overlap"; ALLOW_OVERLA
 class MisfirePolicy(str,Enum): SKIP="skip"; RUN_ONCE="run_once"
 class TaskTrigger(str,Enum): MANUAL="manual"; SCHEDULED="scheduled"; RECOVERY="recovery"
 class TaskRunStatus(str,Enum): QUEUED="queued"; RUNNING="running"; SUCCESS="success"; FAILED="failed"; SKIPPED="skipped"; TIMED_OUT="timed_out"; INTERRUPTED="interrupted"
+class MaintenancePolicy(str,Enum): BLOCK_DURING_MAINTENANCE="block"; RUN_DURING_MAINTENANCE="run"
 
 @dataclass(frozen=True)
 class TaskExecutionContext:
@@ -27,3 +28,4 @@ class RegisteredTask:
     danger:str="low"; requires_process_running:bool=False; requires_discord_ready:bool=False; requires_process_offline:bool=False
     allowed_schedule_types:tuple[ScheduleType,...]=tuple(ScheduleType); misfire_policy:MisfirePolicy=MisfirePolicy.SKIP
     allow_while_bot_disabled:bool=False
+    maintenance_policy:MaintenancePolicy=MaintenancePolicy.BLOCK_DURING_MAINTENANCE

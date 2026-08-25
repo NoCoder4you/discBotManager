@@ -57,6 +57,24 @@ class Backup(Base):
     archive_name: Mapped[str]=mapped_column(String(100),default="data.tar.gz")
     manifest_name: Mapped[str]=mapped_column(String(100),default="manifest.json")
     created_by: Mapped[User|None]=relationship()
+class BotMaintenance(Base):
+    """Durable desired and last agent-applied maintenance state for one bot."""
+    __tablename__="bot_maintenance"
+    bot_id:Mapped[str]=mapped_column(ForeignKey("bots.id"),primary_key=True)
+    enabled:Mapped[bool]=mapped_column(Boolean,default=False,index=True)
+    reason:Mapped[str|None]=mapped_column(String(500))
+    public_message:Mapped[str|None]=mapped_column(String(1000))
+    enabled_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+    enabled_by_id:Mapped[int|None]=mapped_column(ForeignKey("users.id"))
+    planned_end_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+    updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=utcnow,onupdate=utcnow)
+    applied_enabled:Mapped[bool|None]=mapped_column(Boolean)
+    applied_instance_id:Mapped[str|None]=mapped_column(String(41))
+    applied_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+    sync_error:Mapped[str|None]=mapped_column(String(255))
+    bypass_user_ids:Mapped[list]=mapped_column(JSON,default=list)
+    bypass_roles:Mapped[list]=mapped_column(JSON,default=list)
+    enabled_by:Mapped[User|None]=relationship()
 class DataVersion(Base):
     __tablename__="data_versions"
     id: Mapped[int]=mapped_column(primary_key=True)
