@@ -14,6 +14,18 @@ class PermissionOverrideMutation(BaseModel):
     permission_key: str = Field(min_length=3, max_length=100)
     state: Literal["inherit", "allow", "deny"]
 class ProcessAction(BaseModel): action: Literal["start", "stop", "restart"]
+class EnableMaintenanceRequest(BaseModel):
+    reason:str=Field(min_length=1,max_length=500)
+    public_message:str|None=Field(default=None,max_length=1000)
+    planned_end_at:datetime|None=None
+    @field_validator("reason","public_message")
+    @classmethod
+    def maintenance_text(cls,value):
+        if value is None:return None
+        value=value.strip()
+        if "<" in value or ">" in value: raise ValueError("Maintenance text must be plain text")
+        return value or None
+class DisableMaintenanceRequest(BaseModel): pass
 class CreateBackup(BaseModel):
     reason: str|None = Field(default=None,max_length=200)
     @field_validator("reason")
@@ -54,6 +66,7 @@ class AgentHeartbeat(BaseModel):
     guild_count: int|None = Field(default=None,ge=0,le=1000000)
     shard_count: int|None = Field(default=None,ge=1,le=10000)
     ready_shards: int|None = Field(default=None,ge=0,le=10000)
+    maintenance_applied: bool|None = None
     @model_validator(mode="after")
     def consistent(self):
         if self.ready and not self.connected: raise ValueError("ready requires connected")

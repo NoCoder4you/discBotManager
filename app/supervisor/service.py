@@ -13,7 +13,7 @@ import psutil
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import ActivityEvent, Bot, BotInstance, utcnow
+from app.models import ActivityEvent, Bot, BotInstance, BotMaintenance, utcnow
 from app.core.config import get_settings
 from app.services.bot_state import BotStateResolver, StateInputs
 
@@ -86,12 +86,12 @@ class SupervisorService:
         return row
 
     @staticmethod
-    def _payload(row: BotInstance | None, enabled: bool=True) -> dict:
+    def _payload(row: BotInstance | None, enabled: bool=True, maintenance:bool=False) -> dict:
         if not enabled: return {"state":"disabled","process_running":False}
         if not row: return {"state":"offline","process_running":False}
         started=_aware(row.started_at); uptime=max(0,(datetime.now(timezone.utc)-started).total_seconds()) if row.state=="running" and started else None
         settings=get_settings(); running=row.state in {"running","starting"}
-        resolved=BotStateResolver(settings.bot_heartbeat_timeout_seconds,settings.bot_ready_timeout_seconds).resolve(StateInputs(enabled,row.state,running,row.expected_running,started_at=started,connected=row.discord_connected,ready=row.discord_ready,last_heartbeat_at=row.last_heartbeat_at))
+        resolved=BotStateResolver(settings.bot_heartbeat_timeout_seconds,settings.bot_ready_timeout_seconds).resolve(StateInputs(enabled,row.state,running,row.expected_running,started_at=started,connected=row.discord_connected,ready=row.discord_ready,last_heartbeat_at=row.last_heartbeat_at,maintenance=maintenance))
         last=row.last_heartbeat_at; fresh=bool(last and (datetime.now(timezone.utc)-_aware(last)).total_seconds()<=settings.bot_heartbeat_timeout_seconds)
         return {"state":resolved.value,"process_state":row.state,"process_running":running,"pid":row.pid,"instance_id":row.instance_id,"started_at":started.isoformat() if started else None,"uptime_seconds":uptime,"expected_running":row.expected_running,"exit_code":row.exit_code,"discord_connected":row.discord_connected if fresh else False,"discord_ready":row.discord_ready if fresh else False,"heartbeat_fresh":fresh,"last_heartbeat_at":_aware(last).isoformat() if last else None,"ready_at":_aware(row.ready_at).isoformat() if row.ready_at else None,"last_ready_at":_aware(row.last_ready_at).isoformat() if row.last_ready_at else None,"latency_ms":row.discord_latency_ms if fresh else None,"guild_count":row.guild_count if fresh else None}
 
@@ -101,7 +101,8 @@ class SupervisorService:
             if not bot: raise BotNotRegistered("Bot is not registered")
             row=self._current(db,bot_id)
             if row: self._reconcile_row(db,row); db.commit()
-            return self._payload(row,bot.enabled)
+            maintenance=db.get(BotMaintenance,bot.id)
+            return self._payload(row,bot.enabled,bool(maintenance and maintenance.enabled))
 
     def registered_instance(self,bot_id:str)->dict:
         """Read durable telemetry routing identity without triggering OS sampling."""
@@ -130,13 +131,14 @@ class SupervisorService:
                 environment={k:v for k,v in os.environ.items() if k in {"PATH","HOME","USER","LOGNAME","LANG","LC_ALL","TMPDIR","TEMP","TMP","SYSTEMROOT","WINDIR"}}
                 environment["BOT_INSTANCE_ID"]=instance_id
                 environment.update({"BOT_MANAGEMENT_BOT_ID":bot.id,"BOT_MANAGEMENT_SECRET":management_secret,"BOT_MANAGEMENT_HEARTBEAT_URL":f"http://{get_settings().supervisor_host}:{get_settings().supervisor_port}/internal/agent/heartbeat","BOT_HEARTBEAT_INTERVAL_SECONDS":str(get_settings().bot_heartbeat_interval_seconds)})
+                maintenance=db.get(BotMaintenance,bot.id); environment["BOT_MAINTENANCE_STATE"]=self._maintenance_environment(maintenance)
                 flags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name=="nt" else 0
                 try:
                     process=subprocess.Popen([executable,entry],cwd=cwd,env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE if self.console_capture else subprocess.DEVNULL,stderr=subprocess.PIPE if self.console_capture else subprocess.DEVNULL,bufsize=0,start_new_session=os.name!="nt",creationflags=flags)
                     observed=psutil.Process(process.pid); created=datetime.fromtimestamp(observed.create_time(),timezone.utc)
                     row.pid=process.pid; row.process_created_at=created; row.started_at=created; row.state="running"; db.commit()
                     if self.console_capture: self.console_capture.redactor.add_secrets((management_secret,)); self.console_capture.attach(process,bot.id,instance_id)
-                    return self._payload(row)
+                    return self._payload(row,maintenance=bool(maintenance and maintenance.enabled))
                 except (OSError,psutil.Error) as exc:
                     row.state="crashed"; row.expected_running=True; row.ended_at=utcnow(); db.commit(); raise SupervisorConflict("Bot process could not be launched") from exc
         finally: self._lock(bot_id).release()
@@ -179,10 +181,11 @@ class SupervisorService:
                 management_secret=secrets.token_urlsafe(48); bot.management_secret_hash=hashlib.sha256(management_secret.encode()).hexdigest()
                 new=BotInstance(bot_id=bot.id,instance_id=instance_id,state="starting",expected_running=True,python_executable=executable,entry_file=entry,working_directory=cwd,supervisor_instance_id=self.instance_id); db.add(new); db.commit()
                 env={k:v for k,v in os.environ.items() if k in {"PATH","HOME","USER","LOGNAME","LANG","LC_ALL","TMPDIR","TEMP","TMP","SYSTEMROOT","WINDIR"}}; env.update({"BOT_INSTANCE_ID":instance_id,"BOT_MANAGEMENT_BOT_ID":bot.id,"BOT_MANAGEMENT_SECRET":management_secret,"BOT_MANAGEMENT_HEARTBEAT_URL":f"http://{get_settings().supervisor_host}:{get_settings().supervisor_port}/internal/agent/heartbeat","BOT_HEARTBEAT_INTERVAL_SECONDS":str(get_settings().bot_heartbeat_interval_seconds)})
+                maintenance=db.get(BotMaintenance,bot.id); env["BOT_MAINTENANCE_STATE"]=self._maintenance_environment(maintenance)
                 process=subprocess.Popen([executable,entry],cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE if self.console_capture else subprocess.DEVNULL,stderr=subprocess.PIPE if self.console_capture else subprocess.DEVNULL,bufsize=0,start_new_session=os.name!="nt",creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name=="nt" else 0)
                 created=datetime.fromtimestamp(psutil.Process(process.pid).create_time(),timezone.utc); new.pid=process.pid; new.process_created_at=created; new.started_at=created; new.state="running"; db.commit()
                 if self.console_capture: self.console_capture.redactor.add_secrets((management_secret,)); self.console_capture.attach(process,bot.id,instance_id)
-                return self._payload(new)
+                return self._payload(new,maintenance=bool(maintenance and maintenance.enabled))
         finally: self._lock(bot_id).release()
 
     def reconcile(self,bot_id: str | None=None) -> list[dict]:
@@ -192,8 +195,14 @@ class SupervisorService:
             for bot in db.scalars(query):
                 row=self._current(db,bot.id)
                 if row: self._reconcile_row(db,row)
-                result.append({"bot_id":bot.id,**self._payload(row,bot.enabled)})
+                maintenance=db.get(BotMaintenance,bot.id)
+                result.append({"bot_id":bot.id,**self._payload(row,bot.enabled,bool(maintenance and maintenance.enabled))})
             db.commit(); return result
 
     def health(self) -> dict:
         rows=self.reconcile(); return {"status":"online","managed_processes":sum(x["process_running"] for x in rows),"registered_bots":len(rows),"supervisor_instance_id":self.instance_id}
+
+    @staticmethod
+    def _maintenance_environment(row):
+        import json
+        return json.dumps({"enabled":bool(row and row.enabled),"reason":row.reason if row else None,"public_message":row.public_message if row else None,"bypass_user_ids":row.bypass_user_ids if row else [],"bypass_roles":row.bypass_roles if row else []},separators=(",",":"))

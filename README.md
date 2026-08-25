@@ -552,3 +552,23 @@ Stable bot/guild/capability/target fingerprints persist only current status. A p
 ### Stage 9 security boundary
 
 Stage 9 provides **no Discord server mutation**: no automatic fixes, role creation/deletion/reordering/assignment, channel creation/deletion/overwrite changes, message or webhook sending, invites, kicks, bans, timeouts, nickname changes, member directory, arbitrary REST requests, or arbitrary Discord API calls. All effective permission changes must be performed externally in Discord and then observed through a fresh snapshot.
+
+## Maintenance Architecture (Stage 10)
+
+Maintenance follows the existing trusted control path: **Dashboard → `MaintenanceService` → durable database/supervisor heartbeat → `BotManagementAgent` → `MaintenanceGate` → Discord dispatch**. It is a per-bot administrative state, not a process-health state: the process, Discord connection and Ready state, heartbeat, console, telemetry, and diagnostics remain available. A healthy Ready bot resolves to `MAINTENANCE`, while disabled, restarting, stopping, crash, unknown-supervisor, startup, and disconnected conditions retain their higher safety precedence.
+
+### State, permissions, and failure behaviour
+
+`bot_maintenance` stores desired enablement, separate internal reason and public plain-text message, actor/timestamps, optional informational planned end, trusted per-bot bypass IDs, and the last instance-applied state. `ACTIVE`, `PENDING_SYNC`, and `DEGRADED` distinguish desired from applied control; a passed planned end never expires maintenance. Enable and disable require the canonical `bot.maintenance.enable` and `bot.maintenance.disable` permissions, CSRF, bot assignment/visibility, and the existing per-bot operation lock. Explicit permission denial and non-enumerating 404 behaviour remain authoritative. Transitions (not repeated identical requests) publish/audit `BOT_MAINTENANCE_ENABLED` and `BOT_MAINTENANCE_DISABLED`; agent convergence publishes `BOT_MAINTENANCE_SYNCED`. Maintenance itself does not create an incident, while crashes and other failures still do.
+
+### Command blocking, allowlist, and bypass
+
+The dependency-light agent keeps an immutable local `MaintenancePolicyState`, so the hot path performs no database, HTTP, or supervisor call. `integrate_discord_client` installs a global prefix check and a command-tree check covering slash and context-menu commands. `protect_interactive_item` rechecks Views (buttons/selects, including persistent Views) and Modals at interaction/submission time. Interactions receive an ephemeral safe public message; prefix commands receive the same plain-text response. DMs are blocked like guild commands. Running commands are not cancelled; maintenance blocks new dispatches before business logic.
+
+Adapters and bot code may explicitly mark trusted actions with `maintenance_safe`, `MaintenanceGate.register_safe`, or `CommandCapability(maintenance_allowed=True)`. There is no dashboard command-name editor. Trusted Discord user IDs bypass per bot. Role bypass records contain both guild and role string IDs, so they apply only to a member in the configured guild; dashboard platform identity is never inferred to be Discord command identity.
+
+### Scheduler and restart behaviour
+
+Registered tasks default to `BLOCK_DURING_MAINTENANCE`; both scheduled and manual triggers finish as `SKIPPED` before their handler runs. A trusted internal task may opt into `RUN_DURING_MAINTENANCE`, while all its other Stage 7 preconditions still apply.
+
+The supervisor injects the durable desired policy into the child environment before process launch, and the agent constructs its gate from it before Discord integration. This prevents a Ready command-open window for offline enable, normal restart, or supervisor recovery. Every authenticated heartbeat carries the locally applied flag and returns current desired policy; therefore FastAPI outages cannot clear an already-active local gate, and reconnect convergence is automatic and idempotent. If a live agent has not acknowledged a transition, the dashboard truthfully shows `PENDING_SYNC`; disabling maintenance never restarts or repairs the bot and never makes a disconnected bot appear Online.

@@ -88,6 +88,13 @@ def task_run(bot_id:str,task_id:str,payload:SupervisorTaskRun):
 def processes(): return call("reconcile")
 @app.get("/internal/bots/{bot_id}",dependencies=[Depends(authenticated)])
 def status(bot_id:str): return call("status",bot_id)
+@app.get("/internal/bots/{bot_id}/maintenance",dependencies=[Depends(authenticated)])
+def maintenance_state(bot_id:str):
+    from app.models import Bot, BotMaintenance
+    with SessionLocal() as db:
+        if not db.get(Bot,bot_id): raise HTTPException(404,"Resource unavailable")
+        row=db.get(BotMaintenance,bot_id)
+        return {"enabled":bool(row and row.enabled),"applied_enabled":row.applied_enabled if row else None,"applied_instance_id":row.applied_instance_id if row else None}
 @app.get("/internal/bots/{bot_id}/console",dependencies=[Depends(authenticated)])
 def console(bot_id:str,after:int=0,limit:int=1000):
     call("status",bot_id)

@@ -49,6 +49,10 @@ class DiscordCapability:
     channel_id:str|None=None; channel_id_setting:str|None=None
     required_channel_permissions:tuple[str,...]=(); allowed_channel_types:tuple[str,...]=()
     role_id:str|None=None; role_id_setting:str|None=None; requires_role_management:bool=False
+@dataclass(frozen=True)
+class CommandCapability:
+    """Trusted code-owned command/action policy; never populated from dashboard input."""
+    command_id:str; maintenance_allowed:bool=False
 class BaseBotAdapter(ABC):
     supports_heartbeat: bool=False
     supports_discord_status: bool=False
@@ -64,3 +68,4 @@ class BaseBotAdapter(ABC):
     def get_tasks(self)->tuple[RegisteredTask,...]: return ()
     def get_custom_permissions(self)->tuple[str,...]: return ()
     def get_discord_capabilities(self)->tuple[DiscordCapability,...]: return ()
+    def get_command_capabilities(self)->tuple[CommandCapability,...]: return ()
